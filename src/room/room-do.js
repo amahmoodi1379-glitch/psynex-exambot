@@ -1,321 +1,391 @@
-import { now, encChatId } from "../utils.js";
-
-// هر سؤال = 60 ثانیه (۱ دقیقه)
-const QUESTION_DURATION_SEC = 60;
+// RoomDO: منطق بازی داخل Durable Object
+// - انتخاب course/template/mode
+// - شروع بازی و پخش سوال‌ها در گروه
+// - تایمر هر سوال 60 ثانیه با alarms
+// - ثبت پاسخ‌ها و امتیازدهی و لیدربورد
 
 export class RoomDO {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.room = null; // lazy load
+    this.storage = state.storage;
   }
 
+  // ====== Utilities ======
   async load() {
-    if (!this.room) this.room = (await this.state.storage.get("room")) || null;
-    return this.room;
+    return (await this.storage.get("data")) || null;
   }
-  async save() { await this.state.storage.put("room", this.room); }
+  async save(data) {
+    await this.storage.put("data", data);
+    return data;
+  }
+  shuffle(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
+  now() {
+    return Date.now();
+  }
 
-  // --- Telegram helpers (داخل DO) ---
+  // Telegram helpers (ساده و لوکال)
   tgApi(method) {
     return `https://api.telegram.org/bot${this.env.BOT_TOKEN}/${method}`;
   }
-  async tgSendMessage(chat_id, text, extra = {}) {
-    const res = await fetch(this.tgApi("sendMessage"), {
+  async tgCall(method, payload) {
+    const res = await fetch(this.tgApi(method), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id, text, parse_mode: "HTML", ...extra }),
+      body: JSON.stringify(payload),
     });
-    let data = {};
-    try { data = await res.json(); } catch(_) {}
-    if (!res.ok || !data.ok) {
-      console.error("DO TG sendMessage error:", res.status, JSON.stringify(data));
+    let j = {};
+    try { j = await res.json(); } catch {}
+    if (!j.ok) {
+      console.error("TG error", method, res.status, JSON.stringify(j));
     }
-    return data;
+    return j;
   }
-
-  // --- Question rendering ---
-  kbForQuestion(rid, qIdx) {
-    return {
-      inline_keyboard: [[
-        { text: "1", callback_data: `a:${rid}:${qIdx}:0` },
-        { text: "2", callback_data: `a:${rid}:${qIdx}:1` },
-        { text: "3", callback_data: `a:${rid}:${qIdx}:2` },
-        { text: "4", callback_data: `a:${rid}:${qIdx}:3` },
-      ]],
-    };
-  }
-  textForQuestion(qIdx, q) {
-    return `❓ سوال ${qIdx + 1} از ${this.room.questions.length} (⏱ ${QUESTION_DURATION_SEC}s)\n${q.text}\n\nگزینه‌ها:\n1) ${q.options[0]}\n2) ${q.options[1]}\n3) ${q.options[2]}\n4) ${q.options[3]}`;
-  }
-
-  // --- Game flow ---
-  async startQuestion() {
-    const r = this.room;
-    const qIdx = r.qIndex;
-    const q = r.questions[qIdx];
-
-    r.qStartAtMs = now();
-    r.qDeadlineMs = r.qStartAtMs + QUESTION_DURATION_SEC * 1000;
-    r.answersByUser = r.answersByUser || {}; // uid -> { [qIdx]: {opt, tMs} }
-    await this.save();
-
-    await this.tgSendMessage(r.chat_id, this.textForQuestion(qIdx, q), {
-      reply_markup: this.kbForQuestion(r.id, qIdx)
+  sendMessage(chat_id, text, extra = {}) {
+    return this.tgCall("sendMessage", {
+      chat_id, text, parse_mode: "HTML", ...extra,
     });
-
-    await this.state.storage.setAlarm(r.qDeadlineMs);
+  }
+  editMarkup(chat_id, message_id, reply_markup = null) {
+    return this.tgCall("editMessageReplyMarkup", {
+      chat_id, message_id, reply_markup,
+    });
   }
 
-  async advanceOrFinish(by="timer") {
-    const r = this.room;
-    const totalQ = r.questions.length;
-
-    if (r.qIndex + 1 < totalQ) {
-      r.qIndex += 1;
-      await this.save();
-      await this.startQuestion();
-    } else {
-      r.status = "ended";
-      await this.save();
-      await this.postSummary(by);
-    }
+  // ====== R2: load question sets ======
+  async listR2(prefix) {
+    const out = await this.env.QUESTIONS.list({ prefix, limit: 1000 });
+    return out?.objects || [];
+  }
+  async getR2Text(key) {
+    const obj = await this.env.QUESTIONS.get(key);
+    if (!obj) return null;
+    return await obj.text();
   }
 
-  async postSummary(endedBy) {
-    const r = await this.load();
-    const participants = r.participants || Object.keys(r.players || {});
-    const scoreRows = [];
+  async pickRandomSet(courseId, template) {
+    const prefix = `sets/${courseId}/${template}/`;
+    const files = await this.listR2(prefix);
+    if (!files.length) return null;
+    const f = files[Math.floor(Math.random() * files.length)];
+    const txt = await this.getR2Text(f.key);
+    if (!txt) return null;
+    let payload = {};
+    try { payload = JSON.parse(txt); } catch { return null; }
+    if (!Array.isArray(payload.questions)) return null;
+    return payload.questions;
+  }
 
-    for (const uid of participants) {
-      const p = r.players[uid];
-      const answers = (r.answersByUser?.[uid]) || {};
-      let correct = 0;
-      let totalTime = 0;
-      for (let i = 0; i < r.questions.length; i++) {
-        const a = answers[i];
-        if (!a) continue;
-        if (r.questions[i].correct === a.opt) correct++;
-        totalTime += a.tMs || 0;
+  async loadQuestions(courseId, template, count) {
+    if (template === "mix") {
+      // نصف از کنکوری، نصف از تألیفی (اگر کم بود، از نوع موجود جبران)
+      const half = Math.floor(count / 2);
+      const rem = count - half;
+      const kk = await this.pickRandomSet(courseId, "konkoori") || [];
+      const tt = await this.pickRandomSet(courseId, "taalifi") || [];
+      let pool = [];
+      this.shuffle(kk); this.shuffle(tt);
+      pool = kk.slice(0, half).concat(tt.slice(0, rem));
+      if (pool.length < count) {
+        // جبران از هر چه موجود است
+        const extra = kk.concat(tt);
+        this.shuffle(extra);
+        for (const q of extra) {
+          if (pool.length >= count) break;
+          if (!pool.includes(q)) pool.push(q);
+        }
       }
-      scoreRows.push({ name: p?.name || uid, correct, totalTime });
-    }
-
-    scoreRows.sort((a, b) => {
-      if (b.correct !== a.correct) return b.correct - a.correct;
-      return a.totalTime - b.totalTime;
-    });
-
-    const lines = [];
-    lines.push(`🏁 بازی تمام شد (${endedBy === "timer" ? "⏱ با پایان زمان" : "✅ با تکمیل پاسخ‌ها"})`);
-    lines.push("");
-    scoreRows.forEach((row, i) => {
-      const secs = Math.round((row.totalTime || 0) / 1000);
-      lines.push(`${i + 1}. ${row.name} — ✅ ${row.correct}/${r.questions.length} — ⏱ ${secs}s`);
-    });
-    lines.push("");
-
-    // Deep link برای PV: هر شرکت‌کننده خودش را خواهد دید
-    if (this.env.BOT_USERNAME) {
-      const chatKey = encChatId(r.chat_id);
-      const payload = `rv:${chatKey}:${r.id}`;
-      const link = `https://t.me/${this.env.BOT_USERNAME}?start=${encodeURIComponent(payload)}`;
-      lines.push(`برای مرور پاسخ‌های خود در پیام خصوصی روی لینک زیر بزنید:`);
-      lines.push(`<a href="${link}">📥 مرور پاسخ‌ها</a>`);
+      if (pool.length < count) return null;
+      return this.shuffle(pool).slice(0, count);
     } else {
-      lines.push("ℹ️ مرور پاسخ‌ها بعداً فعال می‌شود (BOT_USERNAME تنظیم نشده).");
+      const qs = await this.pickRandomSet(courseId, template);
+      if (!qs || !qs.length) return null;
+      this.shuffle(qs);
+      if (qs.length < count) {
+        // اگر ست کم بود ولی حداقل ۵ تا داشت، همان مقدار را برمی‌داریم
+        if (qs.length >= 5) return qs.slice(0, Math.min(qs.length, count));
+        return null;
+      }
+      return qs.slice(0, count);
     }
-
-    await this.tgSendMessage(r.chat_id, lines.join("\n"));
   }
 
-  everyoneAnsweredCurrent() {
-    const r = this.room;
-    const qIdx = r.qIndex;
-    const participants = r.participants || Object.keys(r.players || {});
-    let answered = 0;
-    for (const uid of participants) {
-      if (r.answersByUser?.[uid]?.[qIdx] != null) answered++;
-    }
-    return { answered, total: participants.length, all: answered === participants.length };
+  // ====== Game flow ======
+  async create({ chat_id, starter_id, starter_name, room_id }) {
+    const data = {
+      chat_id,
+      room_id,
+      starter_id,
+      starter_name,
+      participants: {}, // user_id -> { name, ready, answers[], score, timeMs }
+      modeCount: null,
+      courseId: null,
+      template: null, // "konkoori" | "taalifi" | "mix"
+      started: false,
+      currentIndex: -1,
+      questionDeadline: 0,
+      questionMessageId: null,
+      questions: [], // normalized: {id, text, options[4], correct, explanation?}
+      resultsPosted: false,
+    };
+    await this.save(data);
+    return { ok: true, roomId: room_id };
   }
 
-  reviewForUser(userId) {
-    const r = this.room;
-    if (!r || r.status !== "ended") return { ok: false, error: "not-ended" };
-    if (!r.participants || !r.participants.includes(String(userId))) {
-      return { ok: false, error: "not-participant" };
-    }
-    const answers = r.answersByUser?.[String(userId)] || {};
-    let correct = 0;
-    const parts = [];
-    parts.push(`📄 مرور پاسخ‌ها (${r.questions.length} سؤال)`);
-    parts.push("");
-
-    for (let i = 0; i < r.questions.length; i++) {
-      const q = r.questions[i];
-      const a = answers[i];
-      const isCorrect = a && q.correct === a.opt;
-      if (isCorrect) correct++;
-      const timeSec = a ? Math.round((a.tMs || 0) / 1000) : null;
-      const you = a != null ? (a.opt + 1) : "—";
-      const ans = q.correct + 1;
-      const mark = isCorrect ? "✅" : (a == null ? "⏳" : "❌");
-      parts.push(`${i + 1}) ${mark} پاسخ شما: ${you} — پاسخ صحیح: ${ans}${timeSec != null ? ` — ⏱ ${timeSec}s` : ""}`);
-    }
-    parts.push("");
-    parts.push(`نتیجه: ${correct}/${r.questions.length}`);
-
-    return { ok: true, text: parts.join("\n") };
+  async setMode(by_user, count) {
+    const data = await this.load();
+    if (!data) return { ok: false, error: "no-room" };
+    if (data.started) return { ok: false, error: "already-started" };
+    if (by_user !== data.starter_id) return { ok: false, error: "only-starter" };
+    if (![5, 10].includes(Number(count))) return { ok: false, error: "invalid-mode" };
+    data.modeCount = Number(count);
+    await this.save(data);
+    return { ok: true, modeCount: data.modeCount };
   }
 
+  async setCourse(by_user, courseId) {
+    const data = await this.load();
+    if (!data) return { ok: false, error: "no-room" };
+    if (data.started) return { ok: false, error: "already-started" };
+    if (by_user !== data.starter_id) return { ok: false, error: "only-starter" };
+    if (!courseId) return { ok: false, error: "invalid-course" };
+    data.courseId = String(courseId);
+    await this.save(data);
+    return { ok: true, courseId: data.courseId };
+  }
+
+  async setTemplate(by_user, template) {
+    const data = await this.load();
+    if (!data) return { ok: false, error: "no-room" };
+    if (data.started) return { ok: false, error: "already-started" };
+    if (by_user !== data.starter_id) return { ok: false, error: "only-starter" };
+    if (!["konkoori", "taalifi", "mix"].includes(template)) return { ok: false, error: "invalid-template" };
+    data.template = template;
+    await this.save(data);
+    return { ok: true, template: data.template };
+  }
+
+  async join({ user_id, name }) {
+    const data = await this.load();
+    if (!data) return { ok: false };
+    if (!data.participants[user_id]) {
+      data.participants[user_id] = { name, ready: true, answers: [], score: 0, timeMs: 0 };
+    } else {
+      data.participants[user_id].ready = true;
+      if (name) data.participants[user_id].name = name;
+    }
+    await this.save(data);
+    const readyCount = Object.values(data.participants).filter(p => p.ready).length;
+    return { ok: true, readyCount };
+  }
+
+  async start(by_user) {
+    const data = await this.load();
+    if (!data) return { ok: false, error: "no-room" };
+    if (by_user !== data.starter_id) return { ok: false, error: "only-starter" };
+    if (data.started) return { ok: false, error: "already-started" };
+    if (!data.modeCount) return { ok: false, error: "mode-not-set" };
+    if (!data.courseId) return { ok: false, error: "course-not-set" };
+    if (!data.template) return { ok: false, error: "template-not-set" };
+    const ready = Object.entries(data.participants).filter(([_, p]) => p.ready);
+    if (ready.length === 0) return { ok: false, error: "no-participants" };
+
+    // Load questions from R2
+    const qs = await this.loadQuestions(data.courseId, data.template, data.modeCount);
+    if (!qs || !qs.length) {
+      await this.sendMessage(data.chat_id, "❌ بانک سؤال کافی یافت نشد. لطفاً برای این درس/قالب ست سؤالات بیشتری در R2 آپلود کنید.");
+      return { ok: false, error: "no-questions" };
+    }
+
+    // Normalize questions
+    data.questions = qs.map((q, idx) => ({
+      id: q.id || `Q${idx + 1}`,
+      text: String(q.text || ""),
+      options: Array.isArray(q.options) ? q.options.slice(0,4).map(String) : ["1","2","3","4"],
+      correct: Number.isInteger(q.correct) ? q.correct : 0,
+      explanation: q.explanation ? String(q.explanation) : undefined,
+    }));
+    data.started = true;
+    data.currentIndex = -1;
+    await this.save(data);
+
+    await this.sendMessage(data.chat_id, `🚀 بازی شروع شد!\nدرس: <b>${data.courseId}</b> • قالب: <b>${data.template}</b> • تعداد: <b>${data.modeCount}</b>\n⏱ هر سؤال ۶۰ ثانیه.`);
+    await this.nextQuestion();
+    return { ok: true };
+  }
+
+  async nextQuestion() {
+    const data = await this.load();
+    if (!data || !data.started) return;
+
+    // بستن دکمه‌های سوال قبلی (اگر وجود دارد)
+    if (data.questionMessageId) {
+      await this.editMarkup(data.chat_id, data.questionMessageId, { inline_keyboard: [] });
+    }
+
+    data.currentIndex += 1;
+
+    if (data.currentIndex >= data.questions.length) {
+      // بازی تمام
+      await this.finishGame();
+      return;
+    }
+
+    const q = data.questions[data.currentIndex];
+    const n = data.currentIndex + 1;
+    const total = data.questions.length;
+    const text = [
+      `❓ <b>سؤال ${n}/${total}</b>`,
+      "",
+      q.text,
+      "",
+      `۱) ${q.options[0]}`,
+      `۲) ${q.options[1]}`,
+      `۳) ${q.options[2]}`,
+      `۴) ${q.options[3]}`
+    ].join("\n");
+
+    const kb = {
+      inline_keyboard: [
+        [
+          { text: "۱", callback_data: `a:${data.room_id}:${data.currentIndex}:0` },
+          { text: "۲", callback_data: `a:${data.room_id}:${data.currentIndex}:1` },
+          { text: "۳", callback_data: `a:${data.room_id}:${data.currentIndex}:2` },
+          { text: "۴", callback_data: `a:${data.room_id}:${data.currentIndex}:3` },
+        ]
+      ]
+    };
+
+    const sent = await this.sendMessage(data.chat_id, text, { reply_markup: kb });
+    const mid = sent?.result?.message_id || null;
+    const deadline = this.now() + 60 * 1000; // 60s per question
+    data.questionMessageId = mid;
+    data.questionDeadline = deadline;
+
+    // برای اندازه‌گیری سرعت پاسخ: timestamp شروع سؤال
+    data.qStartTs = this.now();
+    await this.save(data);
+
+    // آلارم برای رفتن به سؤال بعدی
+    await this.state.storage.setAlarm(new Date(deadline));
+  }
+
+  async finishGame() {
+    const data = await this.load();
+    if (!data || data.resultsPosted) return;
+
+    // امتیاز: 1 امتیاز برای هر پاسخ صحیح + پاداش سرعت نسبی (ساده)
+    // (الان به سادگی فقط تعداد صحیح را می‌گیریم؛ می‌توانیم بعداً فرمول دقیق‌تر بگذاریم)
+    const players = Object.entries(data.participants).map(([uid, p]) => {
+      const answers = p.answers || [];
+      let correct = 0;
+      for (const a of answers) if (a && a.ok) correct++;
+      return {
+        uid,
+        name: p.name || ("User"+uid),
+        correct,
+        timeMs: p.timeMs || 0
+      };
+    });
+
+    players.sort((a, b) => {
+      if (b.correct !== a.correct) return b.correct - a.correct;
+      return a.timeMs - b.timeMs; // سریع‌تر بالاتر
+    });
+
+    const lines = ["🏁 نتایج نهایی:"];
+    players.forEach((pl, i) => {
+      const sec = Math.round((pl.timeMs || 0) / 1000);
+      lines.push(`${i+1}. ${pl.name} — ✅ ${pl.correct} | ⏱ ${sec}s`);
+    });
+
+    await this.sendMessage(data.chat_id, lines.join("\n"));
+    data.resultsPosted = true;
+    await this.save(data);
+  }
+
+  async recordAnswer({ user_id, qIndex, option }) {
+    const data = await this.load();
+    if (!data || !data.started) return { ok: false, error: "not-started" };
+    if (qIndex !== data.currentIndex) return { ok: false, error: "out-of-window" };
+
+    // deadline check
+    if (this.now() > data.questionDeadline) {
+      return { ok: false, error: "too-late" };
+    }
+
+    const p = (data.participants[user_id] ||= { name: "User"+user_id, ready: false, answers: [], score: 0, timeMs: 0 });
+
+    // duplicate check
+    if (p.answers[qIndex]) return { ok: true, duplicate: true };
+
+    const q = data.questions[qIndex];
+    const ok = Number(option) === Number(q.correct);
+
+    // زمان پاسخ برای سرعت
+    const elapsed = Math.max(0, this.now() - (data.qStartTs || this.now()));
+    p.timeMs = (p.timeMs || 0) + elapsed;
+    p.answers[qIndex] = { option: Number(option), ok, ms: elapsed };
+
+    await this.save(data);
+    return { ok: true, duplicate: false };
+  }
+
+  // Alarm → رفتن به سؤال بعدی
+  async alarm() {
+    await this.nextQuestion();
+  }
+
+  // ====== Router ======
   async fetch(request) {
     const url = new URL(request.url);
-    const path = url.pathname; // "/create" | "/join" | "/mode" | "/start" | "/answer" | "/review"
-    const body = await request.json().catch(() => ({}));
+    const path = url.pathname;
 
-    if (path === "/create") {
-      const { chat_id, starter_id, starter_name, room_id } = body;
-
-      // *نمونه* بانک 10 سوال (بعداً از R2 می‌آید)
-      const questionsPool = [
-        { id: "Q1", text: "کدام گزینه صحیح است؟", options: ["۱","۲","۳","۴"], correct: 1 },
-        { id: "Q2", text: "روان‌شناسی کدام است؟", options: ["الف","ب","ج","د"], correct: 0 },
-        { id: "Q3", text: "نمونه سؤال سوم", options: ["A","B","C","D"], correct: 2 },
-        { id: "Q4", text: "نمونه سؤال چهارم", options: ["I","II","III","IV"], correct: 3 },
-        { id: "Q5", text: "نمونه سؤال پنجم", options: ["گزینه۱","گزینه۲","گزینه۳","گزینه۴"], correct: 0 },
-        { id: "Q6", text: "نمونه سؤال ششم", options: ["opt1","opt2","opt3","opt4"], correct: 1 },
-        { id: "Q7", text: "نمونه سؤال هفتم", options: ["opt1","opt2","opt3","opt4"], correct: 2 },
-        { id: "Q8", text: "نمونه سؤال هشتم", options: ["opt1","opt2","opt3","opt4"], correct: 3 },
-        { id: "Q9", text: "نمونه سؤال نهم", options: ["opt1","opt2","opt3","opt4"], correct: 1 },
-        { id: "Q10", text: "نمونه سؤال دهم", options: ["opt1","opt2","opt3","opt4"], correct: 2 },
-      ];
-
-      this.room = {
-        id: room_id,
-        chat_id,
-        starter_id,
-        starter_name,
-        status: "lobby", // lobby | running | ended
-        players: { [String(starter_id)]: { name: starter_name || "Starter", ready: true, answers: [] } },
-        createdAt: now(),
-        qIndex: -1,
-        questions: questionsPool, // بعداً با mode برش می‌زنیم
-        participants: null,
-        qStartAtMs: null,
-        qDeadlineMs: null,
-        answersByUser: {}, // uid -> { [qIndex]: {opt, tMs} }
-        modeCount: null,   // 5 یا 10
-      };
-      await this.save();
-      return new Response(JSON.stringify({ ok: true, roomId: this.room.id }), { status: 200 });
+    if (path === "/create" && request.method === "POST") {
+      const body = await request.json();
+      const out = await this.create(body);
+      return new Response(JSON.stringify(out), { status: 200 });
+    }
+    if (path === "/mode" && request.method === "POST") {
+      const { by_user, count } = await request.json();
+      const out = await this.setMode(by_user, Number(count));
+      return new Response(JSON.stringify(out), { status: 200 });
+    }
+    if (path === "/course" && request.method === "POST") {
+      const { by_user, courseId } = await request.json();
+      const out = await this.setCourse(by_user, courseId);
+      return new Response(JSON.stringify(out), { status: 200 });
+    }
+    if (path === "/template" && request.method === "POST") {
+      const { by_user, template } = await request.json();
+      const out = await this.setTemplate(by_user, template);
+      return new Response(JSON.stringify(out), { status: 200 });
+    }
+    if (path === "/join" && request.method === "POST") {
+      const out = await this.join(await request.json());
+      return new Response(JSON.stringify(out), { status: 200 });
+    }
+    if (path === "/start" && request.method === "POST") {
+      const { by_user } = await request.json();
+      const out = await this.start(by_user);
+      return new Response(JSON.stringify(out), { status: 200 });
+    }
+    if (path === "/answer" && request.method === "POST") {
+      const { user_id, qIndex, option } = await request.json();
+      const out = await this.recordAnswer({ user_id, qIndex: Number(qIndex), option: Number(option) });
+      return new Response(JSON.stringify(out), { status: 200 });
+    }
+    if (path === "/review" && request.method === "POST") {
+      // (فعلاً ساده: می‌تونیم بعداً مرور تشریحی را اضافه کنیم)
+      return new Response(JSON.stringify({ ok: false, error: "not-implemented" }), { status: 200 });
     }
 
-    await this.load();
-    if (!this.room) return new Response(JSON.stringify({ ok: false, error: "no-room" }), { status: 404 });
-
-    if (path === "/join") {
-      if (this.room.status !== "lobby")
-        return new Response(JSON.stringify({ ok: false, error: "already-started" }), { status: 400 });
-
-      const { user_id, name } = body;
-      const uid = String(user_id);
-      if (!this.room.players[uid]) this.room.players[uid] = { name, ready: true, answers: [] };
-      else this.room.players[uid].ready = true;
-      await this.save();
-      const readyCount = Object.values(this.room.players).filter((p) => p.ready).length;
-      return new Response(JSON.stringify({ ok: true, readyCount }), { status: 200 });
-    }
-
-    if (path === "/mode") {
-      const { by_user, count } = body; // 5 یا 10
-      if (String(by_user) !== String(this.room.starter_id))
-        return new Response(JSON.stringify({ ok: false, error: "only-starter" }), { status: 403 });
-      if (this.room.status !== "lobby")
-        return new Response(JSON.stringify({ ok: false, error: "already-started" }), { status: 400 });
-
-      const n = Number(count);
-      if (![5, 10].includes(n))
-        return new Response(JSON.stringify({ ok: false, error: "invalid-mode" }), { status: 400 });
-
-      this.room.questions = this.room.questions.slice(0, n);
-      this.room.modeCount = n;
-      await this.save();
-      return new Response(JSON.stringify({ ok: true, modeCount: n }), { status: 200 });
-    }
-
-    if (path === "/start") {
-      const { by_user } = body;
-      if (String(by_user) !== String(this.room.starter_id))
-        return new Response(JSON.stringify({ ok: false, error: "only-starter" }), { status: 403 });
-      if (this.room.status !== "lobby")
-        return new Response(JSON.stringify({ ok: false, error: "already-started" }), { status: 400 });
-      if (!this.room.modeCount)
-        return new Response(JSON.stringify({ ok: false, error: "mode-not-set" }), { status: 400 });
-
-      const participants = Object.entries(this.room.players).filter(([, p]) => p.ready).map(([uid]) => uid);
-      if (participants.length === 0)
-        return new Response(JSON.stringify({ ok: false, error: "no-participants" }), { status: 400 });
-
-      this.room.participants = participants;
-      this.room.status = "running";
-      this.room.qIndex = 0;
-      await this.save();
-      await this.startQuestion();
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
-    }
-
-    if (path === "/answer") {
-      if (this.room.status !== "running")
-        return new Response(JSON.stringify({ ok: false, error: "not-running" }), { status: 400 });
-
-      const { user_id, qIndex, option } = body;
-      const uid = String(user_id);
-      if (!this.room.participants || !this.room.participants.includes(uid))
-        return new Response(JSON.stringify({ ok: false, error: "not-in-participants" }), { status: 403 });
-      if (qIndex !== this.room.qIndex)
-        return new Response(JSON.stringify({ ok: false, error: "stale-question" }), { status: 409 });
-
-      const userAns = (this.room.answersByUser[uid] = this.room.answersByUser[uid] || {});
-      if (userAns[qIndex] != null)
-        return new Response(JSON.stringify({ ok: true, duplicate: true }), { status: 200 });
-
-      const tMs = Math.max(0, now() - (this.room.qStartAtMs || now()));
-      userAns[qIndex] = { opt: option, tMs };
-      await this.save();
-
-      const { answered, total, all } = this.everyoneAnsweredCurrent();
-      await this.tgSendMessage(this.room.chat_id, `📝 پاسخ ثبت شد (${answered}/${total})`);
-
-      if (all) {
-        if (now() < (this.room.qDeadlineMs || 0)) {
-          this.room.qDeadlineMs = now();
-          await this.save();
-        }
-        await this.advanceOrFinish("all-answered");
-      }
-
-      return new Response(JSON.stringify({ ok: true, answeredCount: answered, totalPlayers: total }), { status: 200 });
-    }
-
-    if (path === "/review") {
-      const { user_id } = body;
-      const rep = this.reviewForUser(user_id);
-      return new Response(JSON.stringify(rep), { status: 200 });
-    }
-
-    return new Response(JSON.stringify({ ok: false, error: "bad-path" }), { status: 404 });
-  }
-
-  // --- Alarm handler: پایان زمان هر سؤال ---
-  async alarm() {
-    await this.load();
-    if (!this.room || this.room.status !== "running") return;
-
-    const due = this.room.qDeadlineMs || 0;
-    if (now() < due - 5) return;
-
-    await this.tgSendMessage(this.room.chat_id, "⏱ زمان این سؤال تمام شد.");
-    await this.advanceOrFinish("timer");
+    return new Response("Not Found", { status: 404 });
   }
 }
