@@ -15,3 +15,10 @@ new_sqlite_classes = ["RoomDO"]
 [vars]
 BOT_USERNAME = "psynex_exambot"
 REQUIRED_CHANNEL = "@psynex"
+
+[r2_buckets]
+bindings = [
+  { binding = "exambot-questions", bucket_name = "exambot-questions" }
+]
+
+# (بقیه toml قبلی‌ات مثل migrations و vars همون بمونه)
