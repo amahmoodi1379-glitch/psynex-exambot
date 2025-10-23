@@ -1,24 +1,24 @@
 import { tg } from "./bot/tg.js";
 import { getCommand, shortId, decChatId } from "./utils.js";
-export { RoomDO } from "./room/room-do.js";
+export { RoomDO } from "./room/room-do.js"; // کلاس Durable Object از فایل جداگانه
 
-// ---- helpers عضویت
+// ---------- عضویت کانال: هِلپرها ----------
 function channelLink(env) {
   const ch = env.REQUIRED_CHANNEL || "";
   if (ch.startsWith("@")) return `https://t.me/${ch.slice(1)}`;
-  if (/^-?\d+$/.test(ch)) return "📣 کانال تنظیم‌شده (ID عددی) — اگر عمومی‌ست، username بده تا لینک بسازیم";
+  if (/^-?\d+$/.test(ch)) return "📣 کانال (ID عددی) — اگر عمومی‌ست، username بده تا لینک بسازیم";
   return ch || "—";
 }
 
-// کش ساده در حافظهٔ پردازه برای id کانال
+// کش ساده برای chat_id عددی کانال (وقتی username می‌دهیم)
 let _resolvedChannelId = null;
 
 async function resolveRequiredChannelId(env) {
   const ch = env.REQUIRED_CHANNEL;
-  if (!ch) return null;
-  if (/^-?\d+$/.test(ch)) return Number(ch);
+  if (!ch) return null;                     // کانال اجباری تنظیم نشده
+  if (/^-?\d+$/.test(ch)) return Number(ch); // عددی است
   if (_resolvedChannelId) return _resolvedChannelId;
-  const info = await tg.getChat(env, ch);
+  const info = await tg.getChat(env, ch);    // ch مثل "@your_channel"
   const id = info?.result?.id || null;
   if (id) _resolvedChannelId = id;
   return id;
@@ -26,8 +26,7 @@ async function resolveRequiredChannelId(env) {
 
 async function mustBeMember(env, user_id) {
   const chId = await resolveRequiredChannelId(env);
-  if (!chId) return { ok: true }; // کانالی تعریف نشده → آزاد
-
+  if (!chId) return { ok: true }; // محدودیت غیرفعال
   const res = await tg.getChatMember(env, chId, user_id);
   if (res?.ok) {
     const status = res.result?.status;
@@ -35,20 +34,23 @@ async function mustBeMember(env, user_id) {
     return allowed.includes(status) ? { ok: true } : { ok: false, status };
   } else {
     const desc = res?.description || "";
-    // شایع‌ترین سناریو: بات ادمین کانال نیست
-    if (desc.includes("bot is not a member") || desc.includes("not enough rights") || desc.includes("USER_NOT_PARTICIPANT")) {
+    if (
+      desc.includes("bot is not a member") ||
+      desc.includes("not enough rights") ||
+      desc.includes("USER_NOT_PARTICIPANT")
+    ) {
       return { ok: false, admin_issue: true, description: desc };
     }
-    // سایر خطاها (کانال خصوصی و username نداریم، یا نام اشتباه)
     return { ok: false, api_error: true, description: desc };
   }
 }
 
+// ---------- Worker اصلی ----------
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // ---------- Telegram webhook ----------
+    // --- Telegram webhook ---
     if (url.pathname === "/webhook" && request.method === "POST") {
       const secret = request.headers.get("x-telegram-bot-api-secret-token");
       if (!secret || secret !== env.TG_WEBHOOK_SECRET)
@@ -66,16 +68,22 @@ export default {
         const from = msg.from;
         const cmd = getCommand(msg);
 
-        // تست سریع عضویت (اختیاری)
+        // تست سریع عضویت
         if (cmd === "/check") {
           const chk = await mustBeMember(env, from.id);
           if (chk.ok) {
             await tg.sendMessage(env, chat_id, "✅ عضو کانال هستی. عالی!");
+          } else if (chk.admin_issue) {
+            await tg.sendMessage(
+              env,
+              chat_id,
+              `❌ ربات باید <b>ادمین کانال</b> باشد تا عضویت را بررسی کند.\nکانال: ${channelLink(env)}`
+            );
           } else {
             await tg.sendMessage(
               env,
               chat_id,
-              `❌ برای استفاده باید عضو کانال باشی:\n${channelLink(env)}`
+              `❌ برای استفاده باید عضو کانال باشید:\n${channelLink(env)}`
             );
           }
           return new Response("ok", { status: 200 });
@@ -91,13 +99,19 @@ export default {
             await tg.sendMessage(env, chat_id, "این دستور فقط در گروه کار می‌کند.", { reply_to_message_id: msg.message_id });
             return new Response("ok", { status: 200 });
           }
-          // (اختیاری) حتی می‌تونی سازنده را هم مجبور کنی عضو باشد:
+
+          // (سخت‌گیرانه) سازنده باید عضو کانال باشد
           const chk = await mustBeMember(env, from.id);
           if (!chk.ok) {
-            await tg.sendMessage(env, chat_id, `برای ساخت بازی باید عضو کانال باشی:\n${channelLink(env)}`);
+            if (chk.admin_issue) {
+              await tg.sendMessage(env, chat_id, `❌ ربات باید <b>ادمین کانال</b> باشد.\nکانال: ${channelLink(env)}`);
+            } else {
+              await tg.sendMessage(env, chat_id, `❌ برای ساخت بازی باید عضو کانال باشید:\n${channelLink(env)}`);
+            }
             return new Response("ok", { status: 200 });
           }
 
+          // ساخت اتاق
           const roomId = shortId();
           const key = `${chat_id}-${roomId}`;
           const stub = getStubByKey(key);
@@ -132,14 +146,14 @@ export default {
           await tg.sendMessage(
             env,
             chat_id,
-            "🎮 بازی جدید ساخته شد.\nحالت را انتخاب کنید (۵ یا ۱۰ سؤال، هر سؤال ۱ دقیقه)؛ شرکت‌کننده‌ها «✅ آماده‌ام» را بزنند؛ شروع‌کننده «🟢 آغاز بازی» را بزند."
-              + joinLine,
+            "🎮 بازی جدید ساخته شد.\nحالت را انتخاب کنید (۵ یا ۱۰ سؤال، هر سؤال ۱ دقیقه)؛ شرکت‌کننده‌ها «✅ آماده‌ام» را بزنند؛ شروع‌کننده «🟢 آغاز بازی» را بزند." +
+              joinLine,
             { reply_markup: kb }
           );
           return new Response("ok", { status: 200 });
         }
 
-        // /start (PV) با payload مرور (بدون تغییر نسبت به نسخهٔ قبل)
+        // /start (PV) با payload مرور پاسخ‌ها
         if (cmd === "/start" && chat_type === "private") {
           const parts = (msg.text || "").trim().split(/\s+/);
           const payload = parts.length > 1 ? parts.slice(1).join(" ") : "";
@@ -147,7 +161,6 @@ export default {
             await tg.sendMessage(env, chat_id, "سلام! برای مرور پاسخ‌ها از لینک داخل گروه استفاده کن.");
             return new Response("ok", { status: 200 });
           }
-          // payload: rv:<encChat>:<rid>
           if (payload.startsWith("rv:")) {
             const [, encChat, rid] = payload.split(":");
             const groupChatId = decChatId(encChat);
@@ -190,18 +203,21 @@ export default {
         const key = `${chat_id}-${rid}`;
         const stub = getStubByKey(key);
 
-        // قبل از هر اکشنِ مشارکتی، عضویت چک می‌شود
+        // قبل از هر اکشن مشارکتی، عضویت چک می‌شود
         async function ensureMemberOrNotify() {
           const chk = await mustBeMember(env, from.id);
           if (chk.ok) return true;
-          // نوتیف کوتاه و لینک کانال
-          await tg.answerCallback(env, cq.id, "برای شرکت باید عضو کانال باشید.", true);
-          await tg.sendMessage(env, chat_id, `برای شرکت، ابتدا عضو کانال شوید:\n${channelLink(env)}`);
+          if (chk.admin_issue) {
+            await tg.answerCallback(env, cq.id, "بات باید ادمین کانال باشد.", true);
+            await tg.sendMessage(env, chat_id, `برای ادامه، ربات را ادمین کانال کنید:\n${channelLink(env)}`);
+          } else {
+            await tg.answerCallback(env, cq.id, "برای شرکت باید عضو کانال باشید.", true);
+            await tg.sendMessage(env, chat_id, `برای شرکت، ابتدا عضو کانال شوید:\n${channelLink(env)}`);
+          }
           return false;
         }
 
         if (act === "m") {
-          // فقط استارتر باید عضو باشد؟ فعلاً سخت‌گیرانه: همه
           const ok = await ensureMemberOrNotify();
           if (!ok) return new Response("ok", { status: 200 });
 
@@ -213,7 +229,8 @@ export default {
           const out = await r.json();
           if (!out.ok) {
             await tg.answerCallback(
-              env, cq.id,
+              env,
+              cq.id,
               out.error === "only-starter" ? "فقط شروع‌کننده می‌تواند حالت را انتخاب کند." :
               out.error === "invalid-mode" ? "حالت نامعتبر است." :
               out.error === "already-started" ? "بازی شروع شده." : "خطا",
@@ -251,7 +268,8 @@ export default {
           const out = await r.json();
           if (!out.ok) {
             await tg.answerCallback(
-              env, cq.id,
+              env,
+              cq.id,
               out.error === "only-starter" ? "فقط شروع‌کننده می‌تواند آغاز کند." :
               out.error === "already-started" ? "بازی قبلاً شروع شده." :
               out.error === "mode-not-set" ? "اول حالت (۵ یا ۱۰ سؤال) را انتخاب کنید." :
@@ -289,7 +307,7 @@ export default {
       return new Response("ok", { status: 200 });
     }
 
-    // ---------- Debug helpers ----------
+    // --- ابزارهای دیباگ ---
     if (url.pathname === "/tg/register") {
       const webhookUrl = new URL("/webhook", request.url).toString();
       const out = await tg.call(env, "setWebhook", {
@@ -311,7 +329,7 @@ export default {
       });
     }
 
-    // ---------- Health ----------
+    // --- Health ---
     if (url.pathname === "/") return new Response("psynex-exambot: OK", { status: 200 });
     if (url.pathname === "/health")
       return new Response(JSON.stringify({ ok: true, ts: Date.now() }), {
