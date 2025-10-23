@@ -49,7 +49,8 @@ function getCommand(msg) {
 }
 
 // ===================== Durable Object: Room =====================
-const QUESTION_DURATION_SEC = 15; // ⏱️ مدت هر سؤال (قابل تغییر)
+// هر سؤال = 60 ثانیه (۱ دقیقه)
+const QUESTION_DURATION_SEC = 60;
 
 export class RoomDO {
   constructor(state, env) {
@@ -126,7 +127,6 @@ export class RoomDO {
     const r = this.room;
     const totalQ = r.questions.length;
 
-    // آیا سؤال بعدی وجود دارد؟
     if (r.qIndex + 1 < totalQ) {
       r.qIndex += 1;
       await this.save();
@@ -138,7 +138,6 @@ export class RoomDO {
     }
   }
 
-  // خلاصه نتایج
   async postSummary(endedBy) {
     const r = this.room;
     const participants = r.participants || Object.keys(r.players || {});
@@ -158,13 +157,11 @@ export class RoomDO {
       scoreRows.push({ name: p?.name || uid, correct, totalTime });
     }
 
-    // مرتب‌سازی: بیشترین درست، سپس کمترین زمان
     scoreRows.sort((a, b) => {
       if (b.correct !== a.correct) return b.correct - a.correct;
       return a.totalTime - b.totalTime;
     });
 
-    // متن خلاصه
     const lines = [];
     lines.push(`🏁 بازی تمام شد (${endedBy === "timer" ? "⏱ با پایان زمان" : "✅ با تکمیل پاسخ‌ها"})`);
     lines.push("");
@@ -178,7 +175,6 @@ export class RoomDO {
     await this.tgSendMessage(r.chat_id, lines.join("\n"));
   }
 
-  // چکِ «آیا همه پاسخ داده‌اند؟»
   everyoneAnsweredCurrent() {
     const r = this.room;
     const qIdx = r.qIndex;
@@ -192,21 +188,28 @@ export class RoomDO {
 
   async fetch(request) {
     const url = new URL(request.url);
-    const path = url.pathname; // "/create", "/join", "/start", "/answer"
+    const path = url.pathname; // "/create" | "/join" | "/mode" | "/start" | "/answer"
     const body = await request.json().catch(() => ({}));
 
     if (path === "/create") {
       const { chat_id, starter_id, starter_name, room_id } = body;
 
-      // *نمونه* سوالات — بعداً از R2 می‌آیند
-      const questions = [
+      // *نمونه* بانک 10 سوال (بعداً از R2 می‌آید)
+      const questionsPool = [
         { id: "Q1", text: "کدام گزینه صحیح است؟", options: ["۱","۲","۳","۴"], correct: 1 },
         { id: "Q2", text: "روان‌شناسی کدام است؟", options: ["الف","ب","ج","د"], correct: 0 },
         { id: "Q3", text: "نمونه سؤال سوم", options: ["A","B","C","D"], correct: 2 },
+        { id: "Q4", text: "نمونه سؤال چهارم", options: ["I","II","III","IV"], correct: 3 },
+        { id: "Q5", text: "نمونه سؤال پنجم", options: ["گزینه۱","گزینه۲","گزینه۳","گزینه۴"], correct: 0 },
+        { id: "Q6", text: "نمونه سؤال ششم", options: ["opt1","opt2","opt3","opt4"], correct: 1 },
+        { id: "Q7", text: "نمونه سؤال هفتم", options: ["opt1","opt2","opt3","opt4"], correct: 2 },
+        { id: "Q8", text: "نمونه سؤال هشتم", options: ["opt1","opt2","opt3","opt4"], correct: 3 },
+        { id: "Q9", text: "نمونه سؤال نهم", options: ["opt1","opt2","opt3","opt4"], correct: 1 },
+        { id: "Q10", text: "نمونه سؤال دهم", options: ["opt1","opt2","opt3","opt4"], correct: 2 },
       ];
 
       this.room = {
-        id: room_id,             // شناسه ثابت اتاق
+        id: room_id,
         chat_id,
         starter_id,
         starter_name,
@@ -214,11 +217,13 @@ export class RoomDO {
         players: { [String(starter_id)]: { name: starter_name || "Starter", ready: true, answers: [] } },
         createdAt: now(),
         qIndex: -1,
-        questions,
+        // فعلاً کل 10 سؤال را نگه می‌داریم؛ با انتخاب حالت، برش می‌زنیم
+        questions: questionsPool,
         participants: null,
         qStartAtMs: null,
         qDeadlineMs: null,
         answersByUser: {},       // uid -> { [qIndex]: {opt, tMs} }
+        modeCount: null,         // 5 یا 10
       };
       await this.save();
       return new Response(JSON.stringify({ ok: true, roomId: this.room.id }), { status: 200 });
@@ -242,6 +247,26 @@ export class RoomDO {
       return new Response(JSON.stringify({ ok: true, readyCount }), { status: 200 });
     }
 
+    if (path === "/mode") {
+      // فقط شروع‌کننده می‌تواند تنظیم کند
+      const { by_user, count } = body; // 5 یا 10
+      if (String(by_user) !== String(this.room.starter_id)) {
+        return new Response(JSON.stringify({ ok: false, error: "only-starter" }), { status: 403 });
+      }
+      if (this.room.status !== "lobby") {
+        return new Response(JSON.stringify({ ok: false, error: "already-started" }), { status: 400 });
+      }
+      const n = Number(count);
+      if (![5, 10].includes(n)) {
+        return new Response(JSON.stringify({ ok: false, error: "invalid-mode" }), { status: 400 });
+      }
+      // برش سوالات
+      this.room.questions = this.room.questions.slice(0, n);
+      this.room.modeCount = n;
+      await this.save();
+      return new Response(JSON.stringify({ ok: true, modeCount: n }), { status: 200 });
+    }
+
     if (path === "/start") {
       const { by_user } = body;
       if (String(by_user) !== String(this.room.starter_id)) {
@@ -250,8 +275,10 @@ export class RoomDO {
       if (this.room.status !== "lobby") {
         return new Response(JSON.stringify({ ok: false, error: "already-started" }), { status: 400 });
       }
+      if (!this.room.modeCount) {
+        return new Response(JSON.stringify({ ok: false, error: "mode-not-set" }), { status: 400 });
+      }
 
-      // قفل لیست شرکت‌کنندگان (فقط کسانی که ready هستند)
       const participants = Object.entries(this.room.players)
         .filter(([, p]) => p.ready)
         .map(([uid]) => uid);
@@ -265,7 +292,6 @@ export class RoomDO {
       this.room.qIndex = 0;
       await this.save();
 
-      // پرسیدن سؤال ۱ + تایمر
       await this.startQuestion();
 
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
@@ -278,7 +304,6 @@ export class RoomDO {
       const { user_id, qIndex, option } = body;
       const uid = String(user_id);
 
-      // فقط شرکت‌کننده‌های قفل‌شده اجازه دارند
       if (!this.room.participants || !this.room.participants.includes(uid)) {
         return new Response(JSON.stringify({ ok: false, error: "not-in-participants" }), { status: 403 });
       }
@@ -286,7 +311,6 @@ export class RoomDO {
         return new Response(JSON.stringify({ ok: false, error: "stale-question" }), { status: 409 });
       }
 
-      // ثبت پاسخ (یک‌بار)
       const userAns = (this.room.answersByUser[uid] = this.room.answersByUser[uid] || {});
       if (userAns[qIndex] != null) {
         return new Response(JSON.stringify({ ok: true, duplicate: true }), { status: 200 });
@@ -295,15 +319,11 @@ export class RoomDO {
       userAns[qIndex] = { opt: option, tMs };
       await this.save();
 
-      // شمارش
       const { answered, total, all } = this.everyoneAnsweredCurrent();
       await this.tgSendMessage(this.room.chat_id, `📝 پاسخ ثبت شد (${answered}/${total})`);
 
-      // اگر همه پاسخ دادند → فوراً برو سؤال بعد
       if (all) {
-        // برای جلوگیری از دو بار رفتن (هم تایمر، هم اینجا) یک قفل کوچک نرم
         if (now() < (this.room.qDeadlineMs || 0)) {
-          // زمان را به اکنون ببند تا آلارم اثر نکند
           this.room.qDeadlineMs = now();
           await this.save();
         }
@@ -321,7 +341,6 @@ export class RoomDO {
     await this.load();
     if (!this.room || this.room.status !== "running") return;
 
-    // اگر به هر دلیل آلارم دیر اجرا شد ولی بازی جلو رفته، صرف‌نظر
     const due = this.room.qDeadlineMs || 0;
     if (now() < due - 5) return;
 
@@ -343,7 +362,6 @@ export default {
       }
 
       const update = await request.json().catch(() => ({}));
-
       const getStubByKey = (key) => env.ROOMS.get(env.ROOMS.idFromName(key));
 
       // پیام‌های متنی (Commands)
@@ -367,11 +385,11 @@ export default {
           }
 
           const starter = msg.from;
-          const roomId = shortId(); // شناسه‌ی اتاق
+          const roomId = shortId();
           const nameKey = `${chat_id}-${roomId}`;
           const stub = getStubByKey(nameKey);
 
-          // ساخت اتاق در DO
+          // ساخت اتاق
           const res = await stub.fetch("https://do/create", {
             method: "POST",
             body: JSON.stringify({
@@ -385,15 +403,22 @@ export default {
           const rid = data.roomId;
 
           const kb = {
-            inline_keyboard: [[
-              { text: "✅ آماده‌ام", callback_data: `j:${rid}` },
-              { text: "🟢 آغاز بازی", callback_data: `s:${rid}` },
-            ]],
+            inline_keyboard: [
+              [
+                { text: "۵ سواله (۱ دقیقه‌ای)", callback_data: `m:${rid}:5` },
+                { text: "۱۰ سواله (۱ دقیقه‌ای)", callback_data: `m:${rid}:10` },
+              ],
+              [
+                { text: "✅ آماده‌ام", callback_data: `j:${rid}` },
+                { text: "🟢 آغاز بازی", callback_data: `s:${rid}` },
+              ],
+            ],
           };
+
           await tg.sendMessage(
             env,
             chat_id,
-            "🎮 بازی جدید ساخته شد.\nشرکت‌کننده‌ها: دکمه «✅ آماده‌ام» را بزنید.\nشروع‌کننده می‌تواند «🟢 آغاز بازی» را بزند.",
+            "🎮 بازی جدید ساخته شد.\nحالت را انتخاب کنید (۵ یا ۱۰ سوال، هر سؤال ۱ دقیقه)؛ شرکت‌کننده‌ها «✅ آماده‌ام» را بزنند؛ شروع‌کننده «🟢 آغاز بازی» را بزند.",
             { reply_markup: kb }
           );
 
@@ -407,11 +432,33 @@ export default {
         const msg = cq.message || {};
         const chat_id = msg.chat?.id;
         const from = cq.from;
-        const parts = (cq.data || "").split(":"); // j:<rid> | s:<rid> | a:<rid>:<qIndex>:<opt>
+        const parts = (cq.data || "").split(":"); // m:<rid>:<5|10> | j:<rid> | s:<rid> | a:<rid>:<qIndex>:<opt>
         const act = parts[0];
         const rid = parts[1];
         const key = `${chat_id}-${rid}`;
         const stub = env.ROOMS.get(env.ROOMS.idFromName(key));
+
+        if (act === "m") {
+          const count = Number(parts[2] || 0);
+          const r = await stub.fetch("https://do/mode", {
+            method: "POST",
+            body: JSON.stringify({ by_user: from.id, count }),
+          });
+          const out = await r.json();
+          if (!out.ok) {
+            await tg.answerCallback(
+              env, cq.id,
+              out.error === "only-starter" ? "فقط شروع‌کننده می‌تواند حالت را انتخاب کند." :
+              out.error === "invalid-mode" ? "حالت نامعتبر است." :
+              out.error === "already-started" ? "بازی شروع شده." : "خطا",
+              true
+            );
+            return new Response("ok", { status: 200 });
+          }
+          await tg.answerCallback(env, cq.id, `حالت ${out.modeCount} سواله تنظیم شد.`);
+          await tg.sendMessage(env, chat_id, `⚙️ حالت بازی روی ${out.modeCount} سوال تنظیم شد.`);
+          return new Response("ok", { status: 200 });
+        }
 
         if (act === "j") {
           const r = await stub.fetch("https://do/join", {
@@ -432,17 +479,17 @@ export default {
           const out = await r.json();
           if (!out.ok) {
             await tg.answerCallback(
-              env,
-              cq.id,
+              env, cq.id,
               out.error === "only-starter" ? "فقط شروع‌کننده می‌تواند آغاز کند." :
               out.error === "already-started" ? "بازی قبلاً شروع شده." :
+              out.error === "mode-not-set" ? "اول حالت (۵ یا ۱۰ سوال) را انتخاب کنید." :
               out.error === "no-participants" ? "هیچ شرکت‌کننده‌ای آماده نیست." : "خطا",
               true
             );
             return new Response("ok", { status: 200 });
           }
           await tg.answerCallback(env, cq.id, "بازی شروع شد! ⏱");
-          // توجه: سؤال را خودِ DO ارسال می‌کند.
+          // سؤال‌ها را خودِ DO ارسال و مدیریت می‌کند
           return new Response("ok", { status: 200 });
         }
 
