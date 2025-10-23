@@ -6,20 +6,42 @@ export { RoomDO } from "./room/room-do.js";
 function channelLink(env) {
   const ch = env.REQUIRED_CHANNEL || "";
   if (ch.startsWith("@")) return `https://t.me/${ch.slice(1)}`;
-  if (/^-?\d+$/.test(ch)) return "📣 کانال شما (ID عددی) — لینک عمومی تنظیم کنید";
+  if (/^-?\d+$/.test(ch)) return "📣 کانال تنظیم‌شده (ID عددی) — اگر عمومی‌ست، username بده تا لینک بسازیم";
   return ch || "—";
 }
-async function mustBeMember(env, user_id) {
-  // اگر کانال تعریف نشده بود، محدودیتی اعمال نکن
+
+// کش ساده در حافظهٔ پردازه برای id کانال
+let _resolvedChannelId = null;
+
+async function resolveRequiredChannelId(env) {
   const ch = env.REQUIRED_CHANNEL;
-  if (!ch) return { ok: true };
+  if (!ch) return null;
+  if (/^-?\d+$/.test(ch)) return Number(ch);
+  if (_resolvedChannelId) return _resolvedChannelId;
+  const info = await tg.getChat(env, ch);
+  const id = info?.result?.id || null;
+  if (id) _resolvedChannelId = id;
+  return id;
+}
 
-  const res = await tg.getChatMember(env, ch, user_id);
-  const status = res?.result?.status;
-  const allowed = ["member", "administrator", "creator"];
-  if (allowed.includes(status)) return { ok: true };
+async function mustBeMember(env, user_id) {
+  const chId = await resolveRequiredChannelId(env);
+  if (!chId) return { ok: true }; // کانالی تعریف نشده → آزاد
 
-  return { ok: false, status };
+  const res = await tg.getChatMember(env, chId, user_id);
+  if (res?.ok) {
+    const status = res.result?.status;
+    const allowed = ["member", "administrator", "creator"];
+    return allowed.includes(status) ? { ok: true } : { ok: false, status };
+  } else {
+    const desc = res?.description || "";
+    // شایع‌ترین سناریو: بات ادمین کانال نیست
+    if (desc.includes("bot is not a member") || desc.includes("not enough rights") || desc.includes("USER_NOT_PARTICIPANT")) {
+      return { ok: false, admin_issue: true, description: desc };
+    }
+    // سایر خطاها (کانال خصوصی و username نداریم، یا نام اشتباه)
+    return { ok: false, api_error: true, description: desc };
+  }
 }
 
 export default {
