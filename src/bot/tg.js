@@ -31,4 +31,8 @@ export const tg = {
       show_alert,
     });
   },
+  // --- عضویت کانال ---
+  getChatMember(env, chat_id, user_id) {
+    return this.call(env, "getChatMember", { chat_id, user_id });
+  },
 };
