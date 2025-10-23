@@ -152,41 +152,42 @@ export default {
         return new Response("ok", { status: 200 });
       }
 
-      // /newgame فقط گروه
-      if (cmd === "/newgame") {
-        if (chat_type !== "group" && chat_type !== "supergroup") {
-          await tg.sendMessage(env, chat_id, "این دستور فقط داخل گروه قابل استفاده است.", { reply_to_message_id: msg.message_id });
-          return new Response("ok", { status: 200 });
-        }
-        const appUrl = new URL("/app", request.url).toString();
+      // --- داخل هندل وب‌هوک، جای بخش "/newgame" قبلی را بگیرد ---
+if (cmd === "/newgame") {
+  if (chat_type !== "group" && chat_type !== "supergroup") {
+    await tg.sendMessage(env, chat_id, "این دستور فقط داخل گروه قابل استفاده است.", { reply_to_message_id: msg.message_id });
+    return new Response("ok", { status: 200 });
+  }
 
-        // پیام با دکمه WebApp
-        await tg.sendMessage(env, chat_id, "برای شروع بازی، روی دکمه زیر بزنید:", {
-          reply_to_message_id: msg.message_id,
-          reply_markup: { inline_keyboard: [[{ text: "🚀 شروع بازی (Mini App)", web_app: { url: appUrl } }]] }
-        });
+  const appUrl = new URL("/app", request.url).toString();
 
-        // fallback لینک (اگر دکمه باز نشد)
-        await tg.sendMessage(env, chat_id, `اگر دکمه باز نشد، از داخل تلگرام روی این لینک بزنید:\n<a href="${appUrl}">${appUrl}</a>`);
-        return new Response("ok", { status: 200 });
-      }
-
-      return new Response("ok", { status: 200 });
+  // 1) پیام با دکمه Inline WebApp (مینی‌اپ رسمی داخل خود تلگرام)
+  await tg.sendMessage(env, chat_id, "برای شروع بازی، روی دکمه زیر بزنید:", {
+    reply_to_message_id: msg.message_id,
+    reply_markup: {
+      inline_keyboard: [[
+        { text: "🚀 شروع بازی (Mini App)", web_app: { url: appUrl } }
+      ]]
     }
+  });
 
-    // --- صفحه Mini App ---
-    if (url.pathname === "/app") {
-      const html = htmlApp("Psynex Mini App", "اتصال اولیه برقرار شد.");
-      return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=UTF-8" } });
+  // 2) Reply Keyboard (برای بعضی کلاینت‌ها مثل برخی نسخه‌های Desktop)
+  await tg.sendMessage(env, chat_id, "یا از کیبورد پایین استفاده کنید:", {
+    reply_markup: {
+      keyboard: [[
+        { text: "🚀 شروع بازی", web_app: { url: appUrl } }
+      ]],
+      resize_keyboard: true,
+      one_time_keyboard: true,
+      is_persistent: false,
+      selective: false
     }
+  });
 
-    // --- مسیرهای کمکی ---
-    if (url.pathname === "/") return new Response("psynex-exambot: OK", { status: 200 });
-    if (url.pathname === "/health")
-      return new Response(JSON.stringify({ ok: true, ts: Date.now() }), {
-        status: 200, headers: { "content-type": "application/json; charset=UTF-8" }
-      });
+  // 3) لینک فالبک (اگر هنوز دکمه‌ها نمایش نشدند)
+  await tg.sendMessage(env, chat_id, `اگر دکمه باز نشد، از داخل تلگرام روی این لینک بزنید:\n<a href="${appUrl}">${appUrl}</a>`, {
+    parse_mode: "HTML"
+  });
 
-    return new Response("Not Found", { status: 404 });
-  },
-};
+  return new Response("ok", { status: 200 });
+}
