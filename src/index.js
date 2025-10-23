@@ -1,6 +1,6 @@
 import { tg } from "./bot/tg.js";
-import { getCommand, shortId, decChatId } from "./utils.js";
-export { RoomDO } from "./room/room-do.js"; // DO کلاس
+import { getCommand, shortId } from "./utils.js";
+export { RoomDO } from "./room/room-do.js"; // Durable Object کلاس
 
 // ==============================
 //   Helpers: کانال اجباری
@@ -65,7 +65,7 @@ function makeSlugFromTitle(title) {
   const t = String(title || "").trim();
   const base = t
     .replace(/\s+/g, "-")
-    .replace(/[^\p{L}\p{N}\-_]/gu, "")
+    .replace(/[^\p{L}\p{N}\-_]/gu, "") // اجازهٔ حروف و اعداد همه زبان‌ها + - _
     .toLowerCase();
   const core = base || "course";
   const suffix = Math.random().toString(36).slice(2, 6);
@@ -117,7 +117,7 @@ async function listQuestionSets(env, { course, template, prefixOnly } = {}) {
 }
 
 // ==============================
-//   HTML: داشبورد ادمین (admin2)
+/*   HTML: داشبورد ادمین (admin2) */
 // ==============================
 function admin2Html({ key }) {
   const k = key ? `?key=${encodeURIComponent(key)}` : "";
@@ -208,7 +208,7 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
           <option value="taalifi">تألیفی</option>
         </select>
       </div>
-      <div class="muted small" style="align-self:end">👈 تعداد سؤالات را کاربر داخل بازی انتخاب می‌کند.</div>
+      <div class="muted small" style="align-self:end">👈 تعداد سؤال را کاربر داخل بازی انتخاب می‌کند.</div>
     </div>
   </div>
 
@@ -395,7 +395,9 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
     const id = courseSelect.value;
     if(!id){ alert("درسی انتخاب نشده."); return; }
     if(!confirm("درس حذف شود؟ (فقط متادیتا حذف می‌شود؛ فایل‌های R2 دست‌نخورده می‌مانند)")) return;
-    const r = await fetch(api("/admin/courses&id="+encodeURIComponent(id)), { method:"DELETE" });
+    const base = api("/admin/courses");
+    const sep = base.includes("?") ? "&" : "?";
+    const r = await fetch(base + sep + "id=" + encodeURIComponent(id), { method:"DELETE" });
     const j = await r.json();
     if(j.ok){
       log("درس حذف شد.");
@@ -510,6 +512,7 @@ export default {
           else await tg.sendMessage(env, chat_id, `❌ ابتدا عضو کانال شوید:\n${channelLink(env)}`);
           return new Response("ok", { status: 200 });
         }
+
         if (cmd === "/ping") {
           await tg.sendMessage(env, chat_id, "pong ✅", { reply_to_message_id: msg.message_id });
           return new Response("ok", { status: 200 });
@@ -569,9 +572,51 @@ export default {
           return new Response("ok", { status: 200 });
         }
 
-        // /start برای PV (مرور پاسخ‌ها – بعداً کامل می‌کنیم)
+        // /start برای PV (مرور پاسخ‌ها)
         if (cmd === "/start" && chat_type === "private") {
-          await tg.sendMessage(env, chat_id, "سلام! مرور پاسخ‌ها بعداً فعال می‌شود.");
+          const parts = (msg.text || "").trim().split(/\s+/);
+          const payload = parts.length > 1 ? parts.slice(1).join(" ") : "";
+
+          if (!payload) {
+            await tg.sendMessage(env, chat_id, "سلام! وقتی بازی تمام شد، از لینک «🔍 مرور پاسخ‌ها» داخل گروه وارد شوید.");
+            return new Response("ok", { status: 200 });
+          }
+
+          if (payload.startsWith("rv:")) {
+            const [, encChat, rid] = payload.split(":");
+            if (!encChat || !rid) {
+              await tg.sendMessage(env, chat_id, "payload نامعتبر است.");
+              return new Response("ok", { status: 200 });
+            }
+            // decode base64url
+            function ub64url(s){ s=s.replace(/-/g,"+").replace(/_/g,"/"); while(s.length%4)s+="="; try{ return atob(s);}catch{return "";} }
+            const chatPlain = ub64url(encChat);
+            const groupChatId = chatPlain ? Number(chatPlain) : NaN;
+            if (!Number.isFinite(groupChatId)) {
+              await tg.sendMessage(env, chat_id, "payload نامعتبر است.");
+              return new Response("ok", { status: 200 });
+            }
+
+            const key = `${groupChatId}-${rid}`;
+            const stub = env.ROOMS.get(env.ROOMS.idFromName(key));
+            const r = await stub.fetch("https://do/review", {
+              method: "POST",
+              body: JSON.stringify({ user_id: from.id }),
+            });
+            const out = await r.json();
+            if (!out.ok) {
+              const m =
+                out.error === "not-ended" ? "بازی هنوز تمام نشده است." :
+                out.error === "not-participant" ? "شما در این بازی شرکت نکرده‌اید." :
+                "خطا در دریافت مرور.";
+              await tg.sendMessage(env, chat_id, m);
+              return new Response("ok", { status: 200 });
+            }
+            await tg.sendMessage(env, chat_id, out.text);
+            return new Response("ok", { status: 200 });
+          }
+
+          await tg.sendMessage(env, chat_id, "سلام! برای مرور پاسخ‌ها از لینک داخل گروه استفاده کن.");
           return new Response("ok", { status: 200 });
         }
       }
@@ -811,7 +856,7 @@ export default {
       await saveCourses(env, courses);
       return new Response(JSON.stringify({ ok: true, courses }, null, 2), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
     }
-    if (url.pathname.startsWith("/admin/courses") && request.method === "DELETE") {
+    if (url.pathname === "/admin/courses" && request.method === "DELETE") {
       const key = url.searchParams.get("key") || "";
       if (!env.ADMIN_KEY || key !== env.ADMIN_KEY)
         return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), { status: 401, headers: { "content-type": "application/json; charset=utf-8" } });
