@@ -7,7 +7,11 @@ bindings = [
   { name = "ROOMS", class_name = "RoomDO" }
 ]
 
-# مهم: برای پلن Free باید از new_sqlite_classes استفاده کنیم
 [[migrations]]
 tag = "v1-sqlite"
 new_sqlite_classes = ["RoomDO"]
+
+# 🟢 متغیرهای غیرحساس که باید بعد از هر دپلوی باقی بمانند
+[vars]
+BOT_USERNAME = "psynex_exambot"
+REQUIRED_CHANNEL = "@psynex"
