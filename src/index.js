@@ -23,7 +23,7 @@ async function resolveRequiredChannelId(env) {
   if (id) _resolvedChannelId = id;
   return id;
 }
-
+ 
 async function mustBeMember(env, user_id) {
   const chId = await resolveRequiredChannelId(env);
   if (!chId) return { ok: true }; // محدودیت غیرفعال
