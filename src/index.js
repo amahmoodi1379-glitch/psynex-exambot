@@ -45,7 +45,19 @@ function getCommand(msg) {
   const cmdEnt = entities.find((e) => e.type === "bot_command" && e.offset === 0);
   if (!cmdEnt) return null;
   const raw = text.substring(cmdEnt.offset, cmdEnt.offset + cmdEnt.length).toLowerCase();
-  return raw.split("@")[0]; // "/newgame"
+  return raw.split("@")[0]; // "/newgame" | "/start"
+}
+
+// Deep-link payload encoder/decoder برای chat_id
+function encChatId(chatId) {
+  const n = Number(chatId);
+  return n < 0 ? "n" + (-n).toString(36) : "p" + n.toString(36);
+}
+function decChatId(s) {
+  if (!s || typeof s !== "string") return null;
+  if (s[0] === "n") return -parseInt(s.slice(1), 36);
+  if (s[0] === "p") return parseInt(s.slice(1), 36);
+  return null;
 }
 
 // ===================== Durable Object: Room =====================
@@ -138,8 +150,9 @@ export class RoomDO {
     }
   }
 
+  // خلاصه نتایج + لینک مرور پاسخ‌ها
   async postSummary(endedBy) {
-    const r = this.room;
+    const r = await this.load();
     const participants = r.participants || Object.keys(r.players || {});
     const scoreRows = [];
 
@@ -170,11 +183,22 @@ export class RoomDO {
       lines.push(`${i + 1}. ${row.name} — ✅ ${row.correct}/${r.questions.length} — ⏱ ${secs}s`);
     });
     lines.push("");
-    lines.push("🔜 «دیدن پاسخ‌های صحیح» و مرور شخصی در پیام خصوصی در گام بعدی فعال می‌شود.");
+
+    // Deep link برای PV: هر شرکت‌کننده خودش را خواهد دید
+    if (this.env.BOT_USERNAME) {
+      const chatKey = encChatId(r.chat_id);
+      const payload = `rv:${chatKey}:${r.id}`;
+      const link = `https://t.me/${this.env.BOT_USERNAME}?start=${encodeURIComponent(payload)}`;
+      lines.push(`برای مرور پاسخ‌های خود در پیام خصوصی روی لینک زیر بزنید:`);
+      lines.push(`<a href="${link}">📥 مرور پاسخ‌ها</a>`);
+    } else {
+      lines.push("ℹ️ مرور پاسخ‌ها بعداً فعال می‌شود (BOT_USERNAME تنظیم نشده).");
+    }
 
     await this.tgSendMessage(r.chat_id, lines.join("\n"));
   }
 
+  // چک «همه پاسخ داده‌اند؟»
   everyoneAnsweredCurrent() {
     const r = this.room;
     const qIdx = r.qIndex;
@@ -186,9 +210,41 @@ export class RoomDO {
     return { answered, total: participants.length, all: answered === participants.length };
   }
 
+  // تهیه گزارش مرور برای یک کاربر
+  reviewForUser(userId) {
+    const r = this.room;
+    if (!r || r.status !== "ended") {
+      return { ok: false, error: "not-ended" };
+    }
+    if (!r.participants || !r.participants.includes(String(userId))) {
+      return { ok: false, error: "not-participant" };
+    }
+    const answers = r.answersByUser?.[String(userId)] || {};
+    let correct = 0;
+    const parts = [];
+    parts.push(`📄 مرور پاسخ‌ها (${r.questions.length} سؤال)`);
+    parts.push("");
+
+    for (let i = 0; i < r.questions.length; i++) {
+      const q = r.questions[i];
+      const a = answers[i];
+      const isCorrect = a && q.correct === a.opt;
+      if (isCorrect) correct++;
+      const timeSec = a ? Math.round((a.tMs || 0) / 1000) : null;
+      const you = a != null ? (a.opt + 1) : "—";
+      const ans = q.correct + 1;
+      const mark = isCorrect ? "✅" : (a == null ? "⏳" : "❌");
+      parts.push(`${i + 1}) ${mark} پاسخ شما: ${you} — پاسخ صحیح: ${ans}${timeSec != null ? ` — ⏱ ${timeSec}s` : ""}`);
+    }
+    parts.push("");
+    parts.push(`نتیجه: ${correct}/${r.questions.length}`);
+
+    return { ok: true, text: parts.join("\n") };
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
-    const path = url.pathname; // "/create" | "/join" | "/mode" | "/start" | "/answer"
+    const path = url.pathname; // "/create" | "/join" | "/mode" | "/start" | "/answer" | "/review"
     const body = await request.json().catch(() => ({}));
 
     if (path === "/create") {
@@ -217,8 +273,7 @@ export class RoomDO {
         players: { [String(starter_id)]: { name: starter_name || "Starter", ready: true, answers: [] } },
         createdAt: now(),
         qIndex: -1,
-        // فعلاً کل 10 سؤال را نگه می‌داریم؛ با انتخاب حالت، برش می‌زنیم
-        questions: questionsPool,
+        questions: questionsPool, // بعداً با mode برش می‌زنیم
         participants: null,
         qStartAtMs: null,
         qDeadlineMs: null,
@@ -248,7 +303,6 @@ export class RoomDO {
     }
 
     if (path === "/mode") {
-      // فقط شروع‌کننده می‌تواند تنظیم کند
       const { by_user, count } = body; // 5 یا 10
       if (String(by_user) !== String(this.room.starter_id)) {
         return new Response(JSON.stringify({ ok: false, error: "only-starter" }), { status: 403 });
@@ -260,7 +314,6 @@ export class RoomDO {
       if (![5, 10].includes(n)) {
         return new Response(JSON.stringify({ ok: false, error: "invalid-mode" }), { status: 400 });
       }
-      // برش سوالات
       this.room.questions = this.room.questions.slice(0, n);
       this.room.modeCount = n;
       await this.save();
@@ -278,22 +331,15 @@ export class RoomDO {
       if (!this.room.modeCount) {
         return new Response(JSON.stringify({ ok: false, error: "mode-not-set" }), { status: 400 });
       }
-
-      const participants = Object.entries(this.room.players)
-        .filter(([, p]) => p.ready)
-        .map(([uid]) => uid);
-
+      const participants = Object.entries(this.room.players).filter(([, p]) => p.ready).map(([uid]) => uid);
       if (participants.length === 0) {
         return new Response(JSON.stringify({ ok: false, error: "no-participants" }), { status: 400 });
       }
-
       this.room.participants = participants;
       this.room.status = "running";
       this.room.qIndex = 0;
       await this.save();
-
       await this.startQuestion();
-
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     }
 
@@ -333,6 +379,12 @@ export class RoomDO {
       return new Response(JSON.stringify({ ok: true, answeredCount: answered, totalPlayers: total }), { status: 200 });
     }
 
+    if (path === "/review") {
+      const { user_id } = body;
+      const rep = this.reviewForUser(user_id);
+      return new Response(JSON.stringify(rep), { status: 200 });
+    }
+
     return new Response(JSON.stringify({ ok: false, error: "bad-path" }), { status: 404 });
   }
 
@@ -340,10 +392,8 @@ export class RoomDO {
   async alarm() {
     await this.load();
     if (!this.room || this.room.status !== "running") return;
-
     const due = this.room.qDeadlineMs || 0;
     if (now() < due - 5) return;
-
     await this.tgSendMessage(this.room.chat_id, "⏱ زمان این سؤال تمام شد.");
     await this.advanceOrFinish("timer");
   }
@@ -370,6 +420,7 @@ export default {
         const chat = msg.chat || {};
         const chat_id = chat.id;
         const chat_type = chat.type || "private";
+        const from = msg.from;
 
         const cmd = getCommand(msg);
 
@@ -384,7 +435,7 @@ export default {
             return new Response("ok", { status: 200 });
           }
 
-          const starter = msg.from;
+          const starter = from;
           const roomId = shortId();
           const nameKey = `${chat_id}-${roomId}`;
           const stub = getStubByKey(nameKey);
@@ -418,10 +469,46 @@ export default {
           await tg.sendMessage(
             env,
             chat_id,
-            "🎮 بازی جدید ساخته شد.\nحالت را انتخاب کنید (۵ یا ۱۰ سوال، هر سؤال ۱ دقیقه)؛ شرکت‌کننده‌ها «✅ آماده‌ام» را بزنند؛ شروع‌کننده «🟢 آغاز بازی» را بزند.",
+            "🎮 بازی جدید ساخته شد.\nحالت را انتخاب کنید (۵ یا ۱۰ سؤال، هر سؤال ۱ دقیقه)؛ شرکت‌کننده‌ها «✅ آماده‌ام» را بزنند؛ شروع‌کننده «🟢 آغاز بازی» را بزند.",
             { reply_markup: kb }
           );
 
+          return new Response("ok", { status: 200 });
+        }
+
+        // ----- /start (PV) با payload برای مرور -----
+        if (cmd === "/start" && chat_type === "private") {
+          // متن /start می‌تواند مثل "/start rv:pabc:rid" باشد
+          const parts = (msg.text || "").trim().split(/\s+/);
+          const payload = parts.length > 1 ? parts.slice(1).join(" ") : "";
+          if (payload && payload.startsWith("rv:")) {
+            const [, encChat, rid] = payload.split(":");
+            const groupChatId = decChatId(encChat);
+            if (!groupChatId || !rid) {
+              await tg.sendMessage(env, chat_id, "payload نامعتبر است.");
+              return new Response("ok", { status: 200 });
+            }
+            const key = `${groupChatId}-${rid}`;
+            const stub = getStubByKey(key);
+            const r = await stub.fetch("https://do/review", {
+              method: "POST",
+              body: JSON.stringify({ user_id: from.id }),
+            });
+            const out = await r.json();
+            if (!out.ok) {
+              const m =
+                out.error === "not-ended" ? "بازی هنوز تمام نشده است." :
+                out.error === "not-participant" ? "شما در این بازی شرکت نکرده‌اید." :
+                "خطا در دریافت مرور.";
+              await tg.sendMessage(env, chat_id, m);
+              return new Response("ok", { status: 200 });
+            }
+            await tg.sendMessage(env, chat_id, out.text);
+            return new Response("ok", { status: 200 });
+          }
+
+          // اگر payload نبود:
+          await tg.sendMessage(env, chat_id, "سلام! برای مرور پاسخ‌های بازی، از لینک داخل گروه استفاده کن.");
           return new Response("ok", { status: 200 });
         }
       }
@@ -436,7 +523,7 @@ export default {
         const act = parts[0];
         const rid = parts[1];
         const key = `${chat_id}-${rid}`;
-        const stub = env.ROOMS.get(env.ROOMS.idFromName(key));
+        const stub = getStubByKey(key);
 
         if (act === "m") {
           const count = Number(parts[2] || 0);
@@ -482,7 +569,7 @@ export default {
               env, cq.id,
               out.error === "only-starter" ? "فقط شروع‌کننده می‌تواند آغاز کند." :
               out.error === "already-started" ? "بازی قبلاً شروع شده." :
-              out.error === "mode-not-set" ? "اول حالت (۵ یا ۱۰ سوال) را انتخاب کنید." :
+              out.error === "mode-not-set" ? "اول حالت (۵ یا ۱۰ سؤال) را انتخاب کنید." :
               out.error === "no-participants" ? "هیچ شرکت‌کننده‌ای آماده نیست." : "خطا",
               true
             );
@@ -520,7 +607,7 @@ export default {
       const webhookUrl = new URL("/webhook", request.url).toString();
       const out = await tg.call(env, "setWebhook", {
         url: webhookUrl,
-        secret_token: env.TG_WEBHOOK_SECRET,
+        secret_token: (await request.headers.get("x-telegram-bot-api-secret-token")) || undefined,
         drop_pending_updates: true,
         allowed_updates: ["message", "callback_query"],
       });
