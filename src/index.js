@@ -1,6 +1,6 @@
 import { tg } from "./bot/tg.js";
 import { getCommand, shortId, decChatId } from "./utils.js";
-export { RoomDO } from "./room/room-do.js"; // کلاس Durable Object از فایل جداگانه
+export { RoomDO } from "./room/room-do.js"; // DO کلاس
 
 // ---------- عضویت کانال: هِلپرها ----------
 function channelLink(env) {
@@ -45,22 +45,34 @@ async function mustBeMember(env, user_id) {
   }
 }
 
-// ---------- اعتبارسنجی و ذخیره بانک سؤال در R2 ----------
+// ---------- R2: بانک سؤال / دوره‌ها ----------
+const COURSES_KEY = "admin/courses.json";
+
+async function getCourses(env) {
+  try {
+    const obj = await env.QUESTIONS.get(COURSES_KEY);
+    if (!obj) return [];
+    const txt = await obj.text();
+    const arr = JSON.parse(txt);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+async function saveCourses(env, courses) {
+  const body = JSON.stringify(courses, null, 2);
+  await env.QUESTIONS.put(COURSES_KEY, body, {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+  });
+  return true;
+}
+
 function validateQuestionSet(payload) {
-  // ساختار پیشنهادی:
-  // {
-  //   "course": "general",
-  //   "template": "mix",          // "taalifi" | "konkoori" | "mix"
-  //   "questions": [
-  //     { "id":"q1","text":"...","options":["a","b","c","d"],"correct":2, "explanation":"..." },
-  //     ...
-  //   ]
-  // }
+  // { course, template, questions: [{text, options[4], correct(0..3), id?, explanation?}, ...] }
   if (!payload || typeof payload !== "object") return "Invalid JSON";
   if (!payload.course || typeof payload.course !== "string") return "Missing 'course'";
   if (!payload.template || typeof payload.template !== "string") return "Missing 'template'";
   if (!Array.isArray(payload.questions) || payload.questions.length === 0) return "No questions[]";
-
   for (let i = 0; i < payload.questions.length; i++) {
     const q = payload.questions[i];
     if (!q || typeof q !== "object") return `Question ${i + 1}: invalid`;
@@ -68,16 +80,18 @@ function validateQuestionSet(payload) {
     if (!Array.isArray(q.options) || q.options.length !== 4) return `Question ${i + 1}: options must be 4`;
     if (typeof q.correct !== "number" || q.correct < 0 || q.correct > 3) return `Question ${i + 1}: correct must be 0..3`;
   }
-  return null; // ok
+  return null;
 }
 
 async function putQuestionSetToR2(env, payload) {
-  // مسیر ذخیره: sets/<course>/<template>/<timestamp>-<rand>.json
+  // sets/<course>/<template>/<timestamp>-<rand>.json
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const rand = Math.random().toString(36).slice(2, 8);
   const key = `sets/${payload.course}/${payload.template}/${ts}-${rand}.json`;
   const body = JSON.stringify(payload, null, 2);
-  await env.QUESTIONS.put(key, body, { httpMetadata: { contentType: "application/json; charset=utf-8" } });
+  await env.QUESTIONS.put(key, body, {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+  });
   return key;
 }
 
@@ -86,109 +100,373 @@ async function listQuestionSets(env, { course, template, prefixOnly } = {}) {
   if (course) prefix += `${course}/`;
   if (template) prefix += `${template}/`;
   const all = await env.QUESTIONS.list({ prefix, limit: 1000 });
-  const items = (all?.objects || []).map(o => ({
+  const items = (all?.objects || []).map((o) => ({
     key: o.key,
     size: o.size,
-    uploaded: o.uploaded
+    uploaded: o.uploaded,
   }));
   if (prefixOnly) {
-    // استخراج کورس/قالب‌های موجود از key ها
     const set = new Set();
     for (const it of items) {
       const parts = it.key.split("/");
-      // sets/<course>/<template>/<file>.json
-      if (parts.length >= 4) {
-        const c = parts[1], t = parts[2];
-        set.add(`${c}:${t}`);
-      }
+      if (parts.length >= 4) set.add(`${parts[1]}:${parts[2]}`);
     }
-    return Array.from(set).sort().map(s => {
-      const [c, t] = s.split(":");
-      return { course: c, template: t };
-    });
+    return Array.from(set)
+      .sort()
+      .map((s) => {
+        const [c, t] = s.split(":");
+        return { course: c, template: t };
+      });
   }
   return items;
 }
 
-// ---------- صفحه HTML ساده ادمین ----------
-function adminHtml({ ok, key, msg, sample }) {
+// ---------- HTML داشبورد جدید ----------
+function admin2Html({ key }) {
   const k = key ? `?key=${encodeURIComponent(key)}` : "";
   return new Response(
-`<!doctype html>
+    `<!doctype html>
 <html dir="rtl" lang="fa">
 <head>
   <meta charset="utf-8" />
-  <title>پنل ادمین سوالات - psynex</title>
+  <title>پنل ادمین سؤالات (نسخه ساده و کاربردی)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-  body{font-family:ui-sans-serif,system-ui,Tahoma;max-width:840px;margin:32px auto;padding:0 16px;line-height:1.7}
-  header{display:flex;justify-content:space-between;align-items:center}
-  textarea{width:100%;min-height:220px}
-  .card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:16px 0}
-  .ok{color:#0a7a2f}.err{color:#b20000}
-  code,kbd{background:#f5f5f5;border-radius:6px;padding:2px 6px}
-  table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #eee;padding:8px;text-align:right}
-  .row{display:flex;gap:12px;flex-wrap:wrap}
-  .row > *{flex:1}
+    :root{--b:#0ea5e9;--g:#10b981;--r:#ef4444;--bg:#fafafa;--bd:#e5e7eb}
+    *{box-sizing:border-box}
+    body{font-family:ui-sans-serif,system-ui,Tahoma;background:var(--bg);margin:0;padding:24px}
+    .wrap{max-width:980px;margin:0 auto}
+    h1{margin:0 0 16px 0}
+    .card{background:#fff;border:1px solid var(--bd);border-radius:14px;padding:16px;margin:16px 0;box-shadow:0 2px 10px rgba(0,0,0,.04)}
+    label{display:block;font-weight:600;margin:8px 0 6px}
+    input[type=text], textarea, select{width:100%;padding:10px;border:1px solid var(--bd);border-radius:10px}
+    textarea{min-height:120px}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+    .btn{background:var(--b);border:none;color:#fff;padding:10px 14px;border-radius:10px;cursor:pointer}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    .btn-outline{background:#fff;color:#111;border:1px solid var(--bd)}
+    .btn-green{background:var(--g)}
+    .btn-red{background:var(--r)}
+    .muted{color:#6b7280}
+    table{width:100%;border-collapse:collapse;margin-top:8px}
+    th,td{border-bottom:1px solid var(--bd);padding:8px;text-align:right}
+    .pill{display:inline-block;background:#eef6ff;color:#1d4ed8;border-radius:999px;padding:4px 10px;font-size:12px;border:1px solid #dbeafe}
+    .flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .right{margin-inline-start:auto}
+    .ok{color:#065f46}.err{color:#991b1b}
+    kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-radius:6px;padding:0 6px}
   </style>
 </head>
 <body>
-<header>
-  <h1>📚 پنل ادمین بانک سؤالات</h1>
-  <nav><a href="/admin${k}">آپلود</a> • <a href="/admin/list${k}">فهرست</a></nav>
-</header>
+<div class="wrap">
+  <h1>📚 پنل ادمین سؤالات</h1>
 
-<div class="card">
-  <h3>آپلود JSON</h3>
-  <p>ساختار:<br><code>{ course, template, questions[] }</code> — هر سؤال ۴ گزینه و <code>correct</code> بین ۰..۳.</p>
-  <form method="POST" action="/admin/upload${k}" enctype="multipart/form-data">
+  <div class="card">
+    <div class="flex">
+      <div><b>گام ۱:</b> انتخاب/افزودن درس</div>
+      <div class="right muted">کلید دسترسی در URL نگه دارید (<kbd>?key=...</kbd>)</div>
+    </div>
     <div class="row">
       <div>
-        <label>Course (مثلاً: <code>general</code>)</label>
-        <input name="course" placeholder="general" style="width:100%;padding:8px" />
+        <label>درس (منوی آبشاری)</label>
+        <select id="courseSelect"></select>
       </div>
       <div>
-        <label>Template (مثلاً: <code>mix</code> یا <code>konkoori</code> یا <code>taalifi</code>)</label>
-        <input name="template" placeholder="mix" style="width:100%;padding:8px" />
+        <label>افزودن درس جدید</label>
+        <div class="flex">
+          <input id="courseInput" type="text" placeholder="مثلاً: roshd, amargiri, asab"/>
+          <button id="addCourseBtn" class="btn">افزودن</button>
+        </div>
+        <div class="muted" style="margin-top:6px">فقط حروف/اعداد انگلیسی ساده؛ از فاصله و کاراکتر خاص پرهیز کنید.</div>
       </div>
     </div>
-    <p>۱) فایل JSON آپلود کن:</p>
-    <input type="file" name="file" accept="application/json" />
-    <p>یا ۲) اینجا پیست کن:</p>
-    <textarea name="json" placeholder='${sample.replace(/'/g,"&#39;")}'></textarea>
-    <p><button type="submit" style="padding:10px 16px">آپلود به R2</button></p>
-  </form>
-  ${ok === true ? `<p class="ok">آپلود موفق: ${msg || ""}</p>` : ok === false ? `<p class="err">${msg || "خطا"}</p>` : ""}
+  </div>
+
+  <div class="card">
+    <div class="flex">
+      <div><b>گام ۲:</b> انتخاب قالب</div>
+    </div>
+    <div class="row3">
+      <div>
+        <label>قالب سؤال</label>
+        <select id="templateSelect">
+          <option value="konkoori">کنکوری</option>
+          <option value="taalifi">تألیفی</option>
+          <option value="mix" selected>ترکیبی</option>
+        </select>
+      </div>
+      <div>
+        <label>حجم ست نهایی</label>
+        <select id="setSize">
+          <option value="5" selected>۵ سوال</option>
+          <option value="10">۱۰ سوال</option>
+          <option value="custom">دلخواه</option>
+        </select>
+      </div>
+      <div>
+        <label>تعداد دلخواه (اگر دلخواه انتخاب شد)</label>
+        <input id="customCount" type="text" placeholder="مثلاً 12"/>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="flex">
+      <div><b>گام ۳:</b> ساخت سؤال</div>
+    </div>
+    <label>متن سؤال</label>
+    <textarea id="qText" placeholder="متن سؤال را بنویسید..."></textarea>
+
+    <div class="row">
+      <div>
+        <label>گزینه ۱</label>
+        <input id="opt1" type="text" />
+      </div>
+      <div>
+        <label>گزینه ۲</label>
+        <input id="opt2" type="text" />
+      </div>
+      <div>
+        <label>گزینه ۳</label>
+        <input id="opt3" type="text" />
+      </div>
+      <div>
+        <label>گزینه ۴</label>
+        <input id="opt4" type="text" />
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label>گزینه صحیح</label>
+        <select id="correct">
+          <option value="0">۱</option>
+          <option value="1">۲</option>
+          <option value="2">۳</option>
+          <option value="3">۴</option>
+        </select>
+      </div>
+      <div>
+        <label>توضیح/پاسخ تشریحی (اختیاری)</label>
+        <input id="explanation" type="text" placeholder="اختیاری"/>
+      </div>
+    </div>
+
+    <div class="flex" style="margin-top:10px">
+      <button id="addToDraft" class="btn">افزودن به پیش‌نویس</button>
+      <button id="clearForm" class="btn btn-outline">پاک‌کردن فرم</button>
+      <div class="right muted">پیش‌نویس پایین نمایش داده می‌شود.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="flex">
+      <div><b>گام ۴:</b> پیش‌نویس ست</div>
+      <div class="right">
+        <span class="pill" id="draftCount">۰ سؤال</span>
+      </div>
+    </div>
+    <table id="draftTable">
+      <thead><tr><th>#</th><th>سؤال</th><th>صحیح</th><th>عملیات</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="flex" style="margin-top:10px">
+      <button id="saveSet" class="btn btn-green">ذخیره در R2 (به‌عنوان یک ست JSON)</button>
+      <button id="clearDraft" class="btn btn-red btn-outline">حذف پیش‌نویس</button>
+      <span id="status" class="right muted"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="flex">
+      <div><b>گزارش</b></div>
+      <div class="right"><a id="listLink" target="_blank">مشاهدهٔ فهرست ست‌ها</a></div>
+    </div>
+    <div id="log" class="muted"></div>
+  </div>
 </div>
 
-<div class="card">
-  <h3>نمونه JSON</h3>
-  <pre><code>${sample.replace(/</g,"&lt;")}</code></pre>
-</div>
+<script>
+(function(){
+  const qs = new URLSearchParams(location.search);
+  const KEY = qs.get("key") || "";
+  const api = (p) => KEY ? p + "?key=" + encodeURIComponent(KEY) : p;
 
-<footer style="margin:24px 0;color:#777">R2: ذخیره در مسیر <code>sets/&lt;course&gt;/&lt;template&gt;/&lt;file&gt;.json</code></footer>
+  const courseSelect = document.getElementById("courseSelect");
+  const courseInput  = document.getElementById("courseInput");
+  const addCourseBtn = document.getElementById("addCourseBtn");
+
+  const templateSelect = document.getElementById("templateSelect");
+  const setSize        = document.getElementById("setSize");
+  const customCount    = document.getElementById("customCount");
+
+  const qText = document.getElementById("qText");
+  const opt1  = document.getElementById("opt1");
+  const opt2  = document.getElementById("opt2");
+  const opt3  = document.getElementById("opt3");
+  const opt4  = document.getElementById("opt4");
+  const correct = document.getElementById("correct");
+  const explanation = document.getElementById("explanation");
+
+  const addToDraft = document.getElementById("addToDraft");
+  const clearForm  = document.getElementById("clearForm");
+  const draftTable = document.getElementById("draftTable").querySelector("tbody");
+  const draftCount = document.getElementById("draftCount");
+  const saveSet    = document.getElementById("saveSet");
+  const clearDraft = document.getElementById("clearDraft");
+  const statusEl   = document.getElementById("status");
+  const listLink   = document.getElementById("listLink");
+  const logEl      = document.getElementById("log");
+
+  listLink.href = api("/admin/list");
+
+  let draft = [];
+
+  function log(msg, isErr){
+    const p = document.createElement("div");
+    p.textContent = msg;
+    p.className = isErr ? "err" : "ok";
+    logEl.prepend(p);
+  }
+
+  function refreshDraft(){
+    draftTable.innerHTML = "";
+    draft.forEach((q, i) => {
+      const tr = document.createElement("tr");
+      const sh = q.text.length > 60 ? q.text.slice(0,60) + "…" : q.text;
+      tr.innerHTML = \`<td>\${i+1}</td><td>\${sh}</td><td>\${q.correct+1}</td>
+        <td><button data-i="\${i}" class="rm btn btn-outline btn-red">حذف</button></td>\`;
+      draftTable.appendChild(tr);
+    });
+    draftCount.textContent = \`\${draft.length} سؤال\`;
+  }
+
+  function clearQuestionForm(){
+    qText.value = "";
+    opt1.value = ""; opt2.value = ""; opt3.value = ""; opt4.value = "";
+    correct.value = "0";
+    explanation.value = "";
+    qText.focus();
+  }
+
+  async function loadCourses(){
+    try{
+      const r = await fetch(api("/admin/courses"));
+      const j = await r.json();
+      if(!j.ok) throw new Error(j.error || "courses fetch error");
+      const arr = j.courses || [];
+      courseSelect.innerHTML = "";
+      if(arr.length === 0){
+        const op = document.createElement("option");
+        op.value = ""; op.textContent = "— ابتدا درس اضافه کنید —";
+        courseSelect.appendChild(op);
+      }else{
+        arr.forEach(c=>{
+          const op = document.createElement("option");
+          op.value = c; op.textContent = c;
+          courseSelect.appendChild(op);
+        });
+      }
+    }catch(e){
+      courseSelect.innerHTML = '<option value="">خطا در دریافت فهرست دروس</option>';
+    }
+  }
+
+  addCourseBtn.addEventListener("click", async ()=>{
+    const v = (courseInput.value || "").trim();
+    if(!v){ alert("نام درس را وارد کنید"); return; }
+    if(!/^[a-z0-9_\\-]+$/i.test(v)){ alert("فقط حروف/اعداد انگلیسی و - یا _"); return; }
+    const r = await fetch(api("/admin/courses"), {
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({course:v})
+    });
+    const j = await r.json();
+    if(j.ok){
+      log("درس اضافه شد: " + v);
+      courseInput.value = "";
+      loadCourses();
+    }else{
+      alert("خطا: " + (j.error||""));
+    }
+  });
+
+  draftTable.addEventListener("click", (e)=>{
+    const t = e.target.closest(".rm");
+    if(!t) return;
+    const i = Number(t.getAttribute("data-i"));
+    draft.splice(i,1);
+    refreshDraft();
+  });
+
+  clearForm.addEventListener("click", clearQuestionForm);
+
+  addToDraft.addEventListener("click", ()=>{
+    const text = (qText.value||"").trim();
+    const o1 = (opt1.value||"").trim();
+    const o2 = (opt2.value||"").trim();
+    const o3 = (opt3.value||"").trim();
+    const o4 = (opt4.value||"").trim();
+    const c  = Number(correct.value);
+    if(!text || !o1 || !o2 || !o3 || !o4){ alert("همه فیلدهای سؤال و گزینه‌ها لازم‌اند"); return; }
+    draft.push({
+      id: "Q" + (Date.now().toString(36) + Math.random().toString(36).slice(2,6)).toUpperCase(),
+      text, options:[o1,o2,o3,o4], correct:c,
+      ...(explanation.value ? { explanation: explanation.value } : {})
+    });
+    refreshDraft();
+    clearQuestionForm();
+  });
+
+  clearDraft.addEventListener("click", ()=>{
+    if(confirm("کل پیش‌نویس پاک شود؟")){ draft = []; refreshDraft(); }
+  });
+
+  saveSet.addEventListener("click", async ()=>{
+    const course = courseSelect.value;
+    const template = templateSelect.value;
+    if(!course){ alert("ابتدا یک درس انتخاب یا اضافه کنید"); return; }
+    if(draft.length === 0){ alert("هیچ سؤالی در پیش‌نویس نیست"); return; }
+
+    // اگر ۵/۱۰ انتخاب شده، به همان اندازه برش می‌زنیم
+    let finalQs = draft.slice();
+    const sz = setSize.value;
+    if(sz === "5") finalQs = draft.slice(0,5);
+    else if(sz === "10") finalQs = draft.slice(0,10);
+    else if(sz === "custom"){
+      const n = parseInt(customCount.value,10);
+      if(!Number.isFinite(n) || n<=0){ alert("عدد دلخواه نامعتبر است"); return; }
+      finalQs = draft.slice(0,n);
+    }
+
+    const payload = { course, template, questions: finalQs };
+    statusEl.textContent = "در حال ذخیره...";
+    const r = await fetch(api("/admin/save-set"), {
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify(payload)
+    });
+    const j = await r.json();
+    if(j.ok){
+      statusEl.textContent = "✅ ذخیره شد: " + j.key;
+      log("ست ذخیره شد: " + j.key);
+      // بعد از ذخیره: پیش‌نویس را نگه می‌داریم تا اگر خواستی ادامه بدی؛
+      // اگر خواستی پاک شود، خودت بزن «حذف پیش‌نویس».
+    }else{
+      statusEl.textContent = "❌ " + (j.error||"خطا در ذخیره");
+    }
+  });
+
+  // init
+  loadCourses();
+})();
+</script>
 </body>
 </html>`,
     { status: 200, headers: { "content-type": "text/html; charset=utf-8" } }
   );
 }
-
-const SAMPLE_JSON = JSON.stringify({
-  course: "general",
-  template: "mix",
-  questions: [
-    { id: "Q1", text: "کدام گزینه صحیح است؟", options: ["۱","۲","۳","۴"], correct: 1, explanation: "نمونه." },
-    { id: "Q2", text: "روان‌شناسی کدام است؟", options: ["الف","ب","ج","د"], correct: 0 },
-    { id: "Q3", text: "نمونه سؤال سوم", options: ["A","B","C","D"], correct: 2 },
-    { id: "Q4", text: "نمونه سؤال چهارم", options: ["I","II","III","IV"], correct: 3 },
-    { id: "Q5", text: "نمونه سؤال پنجم", options: ["گزینه۱","گزینه۲","گزینه۳","گزینه۴"], correct: 0 },
-    { id: "Q6", text: "نمونه سؤال ششم", options: ["opt1","opt2","opt3","opt4"], correct: 1 },
-    { id: "Q7", text: "نمونه سؤال هفتم", options: ["opt1","opt2","opt3","opt4"], correct: 2 },
-    { id: "Q8", text: "نمونه سؤال هشتم", options: ["opt1","opt2","opt3","opt4"], correct: 3 },
-    { id: "Q9", text: "نمونه سؤال نهم", options: ["opt1","opt2","opt3","opt4"], correct: 1 },
-    { id: "Q10", text: "نمونه سؤال دهم", options: ["opt1","opt2","opt3","opt4"], correct: 2 }
-  ]
-}, null, 2);
 
 // ---------- Worker اصلی ----------
 export default {
@@ -444,51 +722,16 @@ export default {
       return new Response("ok", { status: 200 });
     }
 
-    // ---------- پنل ادمین (R2) ----------
-    if (url.pathname === "/admin" && request.method === "GET") {
+    // ---------- پنل ادمین جدید ----------
+    if (url.pathname === "/admin2" && request.method === "GET") {
       const key = url.searchParams.get("key") || "";
       if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) {
-        return adminHtml({ ok: false, key: "", msg: "دسترسی ندارید (key نامعتبر است).", sample: SAMPLE_JSON });
+        return new Response("Unauthorized", { status: 401 });
       }
-      return adminHtml({ ok: null, key, msg: "", sample: SAMPLE_JSON });
+      return admin2Html({ key });
     }
 
-    if (url.pathname === "/admin/upload" && request.method === "POST") {
-      const key = url.searchParams.get("key") || "";
-      if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) {
-        return adminHtml({ ok: false, key: "", msg: "دسترسی ندارید (key نامعتبر است).", sample: SAMPLE_JSON });
-      }
-      const form = await request.formData();
-      let txt = "";
-      const file = form.get("file");
-      if (file && typeof file.text === "function") {
-        txt = await file.text();
-      } else {
-        txt = String(form.get("json") || "").trim();
-      }
-
-      let payload = null;
-      try { payload = txt ? JSON.parse(txt) : {}; } catch (e) {
-        return adminHtml({ ok: false, key, msg: "JSON نامعتبر است.", sample: SAMPLE_JSON });
-      }
-
-      // اگر course/template در فرم داده شده بود و در payload نیست، تزریق کن
-      const course = String(form.get("course") || "").trim();
-      const template = String(form.get("template") || "").trim();
-      if (!payload.course && course) payload.course = course;
-      if (!payload.template && template) payload.template = template;
-
-      const err = validateQuestionSet(payload);
-      if (err) return adminHtml({ ok: false, key, msg: `❌ ${err}`, sample: SAMPLE_JSON });
-
-      try {
-        const savedKey = await putQuestionSetToR2(env, payload);
-        return adminHtml({ ok: true, key, msg: `✅ ذخیره شد: ${savedKey}`, sample: SAMPLE_JSON });
-      } catch (e) {
-        return adminHtml({ ok: false, key, msg: "خطا در ذخیره R2", sample: SAMPLE_JSON });
-      }
-    }
-
+    // لیست ست‌ها (برای لینک داخل صفحه)
     if (url.pathname === "/admin/list" && request.method === "GET") {
       const key = url.searchParams.get("key") || "";
       if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) {
@@ -509,7 +752,79 @@ export default {
       });
     }
 
-    // --- ابزارهای دیباگ ---
+    // API: Courses - GET
+    if (url.pathname === "/admin/courses" && request.method === "GET") {
+      const key = url.searchParams.get("key") || "";
+      if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) {
+        return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), {
+          status: 401, headers: { "content-type": "application/json; charset=utf-8" }
+        });
+      }
+      const courses = await getCourses(env);
+      return new Response(JSON.stringify({ ok: true, courses }, null, 2), {
+        status: 200, headers: { "content-type": "application/json; charset=utf-8" }
+      });
+    }
+
+    // API: Courses - POST (add)
+    if (url.pathname === "/admin/courses" && request.method === "POST") {
+      const key = url.searchParams.get("key") || "";
+      if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) {
+        return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), {
+          status: 401, headers: { "content-type": "application/json; charset=utf-8" }
+        });
+      }
+      let body = {};
+      try { body = await request.json(); } catch {}
+      const course = String((body.course||"").trim());
+      if (!course) {
+        return new Response(JSON.stringify({ ok: false, error: "missing course" }), {
+          status: 400, headers: { "content-type": "application/json; charset=utf-8" }
+        });
+      }
+      const okName = /^[a-z0-9_-]+$/i.test(course);
+      if (!okName) {
+        return new Response(JSON.stringify({ ok: false, error: "invalid course name" }), {
+          status: 400, headers: { "content-type": "application/json; charset=utf-8" }
+        });
+      }
+      const courses = await getCourses(env);
+      if (!courses.includes(course)) courses.push(course);
+      await saveCourses(env, courses);
+      return new Response(JSON.stringify({ ok: true, courses }, null, 2), {
+        status: 200, headers: { "content-type": "application/json; charset=utf-8" }
+      });
+    }
+
+    // API: Save set
+    if (url.pathname === "/admin/save-set" && request.method === "POST") {
+      const key = url.searchParams.get("key") || "";
+      if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) {
+        return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), {
+          status: 401, headers: { "content-type": "application/json; charset=utf-8" }
+        });
+      }
+      let payload = {};
+      try { payload = await request.json(); } catch {}
+      const err = validateQuestionSet(payload);
+      if (err) {
+        return new Response(JSON.stringify({ ok: false, error: err }), {
+          status: 400, headers: { "content-type": "application/json; charset=utf-8" }
+        });
+      }
+      try {
+        const keySaved = await putQuestionSetToR2(env, payload);
+        return new Response(JSON.stringify({ ok: true, key: keySaved }, null, 2), {
+          status: 200, headers: { "content-type": "application/json; charset=utf-8" }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: "R2 put error" }), {
+          status: 500, headers: { "content-type": "application/json; charset=utf-8" }
+        });
+      }
+    }
+
+    // ---------- ابزارهای دیباگ تلگرام ----------
     if (url.pathname === "/tg/register") {
       const webhookUrl = new URL("/webhook", request.url).toString();
       const out = await tg.call(env, "setWebhook", {
