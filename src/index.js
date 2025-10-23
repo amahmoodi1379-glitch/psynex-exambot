@@ -81,12 +81,16 @@ function makeSlugFromTitle(title) {
   const suffix = Math.random().toString(36).slice(2, 6);
   return `${core}-${suffix}`;
 }
+const ALLOWED_TEMPLATES = new Set(["konkoori", "taalifi"]);
 
 function validateQuestionSet(payload) {
   // { course, template, questions: [{id,text, options[4], correct(0..3), explanation?}, ...] }
   if (!payload || typeof payload !== "object") return "Invalid JSON";
   if (!payload.course || typeof payload.course !== "string") return "Missing 'course'";
   if (!payload.template || typeof payload.template !== "string") return "Missing 'template'";
+  if (!ALLOWED_TEMPLATES.has(payload.template)) {
+  return "template must be 'konkoori' or 'taalifi'";
+}
   if (!Array.isArray(payload.questions) || payload.questions.length === 0) return "No questions[]";
   for (let i = 0; i < payload.questions.length; i++) {
     const q = payload.questions[i];
@@ -227,7 +231,6 @@ function admin2Html({ key }) {
         <select id="templateSelect">
           <option value="konkoori">کنکوری</option>
           <option value="taalifi">تألیفی</option>
-          <option value="mix" selected>ترکیبی</option>
         </select>
       </div>
       <div class="muted small" style="align-self:end">👈 تعداد سؤالاتِ ست را کاربر داخل بازی انتخاب می‌کند.</div>
