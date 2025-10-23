@@ -46,6 +46,7 @@ async function mustBeMember(env, user_id) {
 }
 
 // ---------- R2: بانک سؤال / دوره‌ها ----------
+// courses.json به شکل آرایه‌ای از آبجکت‌ها ذخیره می‌شود: [{ id: "slug-...", title: "نام فارسی" }, ...]
 const COURSES_KEY = "admin/courses.json";
 
 async function getCourses(env) {
@@ -67,8 +68,22 @@ async function saveCourses(env, courses) {
   return true;
 }
 
+// ساخت slug/id پایدار از عنوان فارسی (حافظه‌امن: فقط برای id داخلی استفاده می‌شود)
+function makeSlugFromTitle(title) {
+  // 1) فاصله‌ها به -  2) حذف کاراکترهای غیرمجاز برای کلید R2  3) fallback اگر خالی شد
+  const t = String(title || "").trim();
+  const base = t
+    .replace(/\s+/g, "-")
+    .replace(/[^\p{L}\p{N}\-_]/gu, "") // فقط حروف/اعداد همه‌زبان‌ها + - _
+    .toLowerCase();
+  const core = base || "course";
+  // یکتا کردن با suffix کوتاه
+  const suffix = Math.random().toString(36).slice(2, 6);
+  return `${core}-${suffix}`;
+}
+
 function validateQuestionSet(payload) {
-  // { course, template, questions: [{text, options[4], correct(0..3), id?, explanation?}, ...] }
+  // { course, template, questions: [{id,text, options[4], correct(0..3), explanation?}, ...] }
   if (!payload || typeof payload !== "object") return "Invalid JSON";
   if (!payload.course || typeof payload.course !== "string") return "Missing 'course'";
   if (!payload.template || typeof payload.template !== "string") return "Missing 'template'";
@@ -76,6 +91,7 @@ function validateQuestionSet(payload) {
   for (let i = 0; i < payload.questions.length; i++) {
     const q = payload.questions[i];
     if (!q || typeof q !== "object") return `Question ${i + 1}: invalid`;
+    if (!q.id || typeof q.id !== "string") return `Question ${i + 1}: missing 'id'`;
     if (!q.text || typeof q.text !== "string") return `Question ${i + 1}: missing 'text'`;
     if (!Array.isArray(q.options) || q.options.length !== 4) return `Question ${i + 1}: options must be 4`;
     if (typeof q.correct !== "number" || q.correct < 0 || q.correct > 3) return `Question ${i + 1}: correct must be 0..3`;
@@ -84,7 +100,7 @@ function validateQuestionSet(payload) {
 }
 
 async function putQuestionSetToR2(env, payload) {
-  // sets/<course>/<template>/<timestamp>-<rand>.json
+  // sets/<courseId>/<template>/<timestamp>-<rand>.json
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const rand = Math.random().toString(36).slice(2, 8);
   const key = `sets/${payload.course}/${payload.template}/${ts}-${rand}.json`;
@@ -121,15 +137,15 @@ async function listQuestionSets(env, { course, template, prefixOnly } = {}) {
   return items;
 }
 
-// ---------- HTML داشبورد جدید ----------
+// ---------- HTML داشبورد جدید (admin2) ----------
 function admin2Html({ key }) {
   const k = key ? `?key=${encodeURIComponent(key)}` : "";
   return new Response(
-    `<!doctype html>
+`<!doctype html>
 <html dir="rtl" lang="fa">
 <head>
   <meta charset="utf-8" />
-  <title>پنل ادمین سؤالات (نسخه ساده و کاربردی)</title>
+  <title>پنل ادمین سؤالات (ساده اما حرفه‌ای)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root{--b:#0ea5e9;--g:#10b981;--r:#ef4444;--bg:#fafafa;--bd:#e5e7eb}
@@ -156,6 +172,7 @@ function admin2Html({ key }) {
     .right{margin-inline-start:auto}
     .ok{color:#065f46}.err{color:#991b1b}
     kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-radius:6px;padding:0 6px}
+    .small{font-size:12px}
   </style>
 </head>
 <body>
@@ -164,21 +181,38 @@ function admin2Html({ key }) {
 
   <div class="card">
     <div class="flex">
-      <div><b>گام ۱:</b> انتخاب/افزودن درس</div>
-      <div class="right muted">کلید دسترسی در URL نگه دارید (<kbd>?key=...</kbd>)</div>
+      <div><b>گام ۱:</b> انتخاب/افزودن/ویرایش درس</div>
+      <div class="right muted small">کلید دسترسی در URL بماند (<kbd>?key=...</kbd>)</div>
     </div>
     <div class="row">
       <div>
         <label>درس (منوی آبشاری)</label>
         <select id="courseSelect"></select>
+        <div class="small muted" id="courseIdHint"></div>
       </div>
       <div>
-        <label>افزودن درس جدید</label>
+        <label>افزودن درس جدید (عنوان فارسی)</label>
         <div class="flex">
-          <input id="courseInput" type="text" placeholder="مثلاً: roshd, amargiri, asab"/>
+          <input id="courseInput" type="text" placeholder="مثلاً: رشد، آمار، عصب‌روان‌شناسی"/>
           <button id="addCourseBtn" class="btn">افزودن</button>
         </div>
-        <div class="muted" style="margin-top:6px">فقط حروف/اعداد انگلیسی ساده؛ از فاصله و کاراکتر خاص پرهیز کنید.</div>
+        <div class="muted small" style="margin-top:6px">برای هر عنوان، یک شناسهٔ پایدار ساخته می‌شود و با آن ذخیره می‌گردد.</div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <div>
+        <label>ویرایش نام درس انتخابی</label>
+        <div class="flex">
+          <input id="renameInput" type="text" placeholder="نام جدید فارسی"/>
+          <button id="renameBtn" class="btn btn-outline">تغییر نام</button>
+        </div>
+      </div>
+      <div>
+        <label>حذف درس</label>
+        <div class="flex">
+          <button id="deleteCourseBtn" class="btn btn-red btn-outline">حذف این درس</button>
+        </div>
+        <div class="small muted">حذف فقط متادیتا را پاک می‌کند؛ فایل‌های ست قبلی حذف نمی‌شوند.</div>
       </div>
     </div>
   </div>
@@ -196,18 +230,7 @@ function admin2Html({ key }) {
           <option value="mix" selected>ترکیبی</option>
         </select>
       </div>
-      <div>
-        <label>حجم ست نهایی</label>
-        <select id="setSize">
-          <option value="5" selected>۵ سوال</option>
-          <option value="10">۱۰ سوال</option>
-          <option value="custom">دلخواه</option>
-        </select>
-      </div>
-      <div>
-        <label>تعداد دلخواه (اگر دلخواه انتخاب شد)</label>
-        <input id="customCount" type="text" placeholder="مثلاً 12"/>
-      </div>
+      <div class="muted small" style="align-self:end">👈 تعداد سؤالاتِ ست را کاربر داخل بازی انتخاب می‌کند.</div>
     </div>
   </div>
 
@@ -219,22 +242,10 @@ function admin2Html({ key }) {
     <textarea id="qText" placeholder="متن سؤال را بنویسید..."></textarea>
 
     <div class="row">
-      <div>
-        <label>گزینه ۱</label>
-        <input id="opt1" type="text" />
-      </div>
-      <div>
-        <label>گزینه ۲</label>
-        <input id="opt2" type="text" />
-      </div>
-      <div>
-        <label>گزینه ۳</label>
-        <input id="opt3" type="text" />
-      </div>
-      <div>
-        <label>گزینه ۴</label>
-        <input id="opt4" type="text" />
-      </div>
+      <div><label>گزینه ۱</label><input id="opt1" type="text" /></div>
+      <div><label>گزینه ۲</label><input id="opt2" type="text" /></div>
+      <div><label>گزینه ۳</label><input id="opt3" type="text" /></div>
+      <div><label>گزینه ۴</label><input id="opt4" type="text" /></div>
     </div>
 
     <div class="row">
@@ -263,16 +274,14 @@ function admin2Html({ key }) {
   <div class="card">
     <div class="flex">
       <div><b>گام ۴:</b> پیش‌نویس ست</div>
-      <div class="right">
-        <span class="pill" id="draftCount">۰ سؤال</span>
-      </div>
+      <div class="right"><span class="pill" id="draftCount">۰ سؤال</span></div>
     </div>
     <table id="draftTable">
-      <thead><tr><th>#</th><th>سؤال</th><th>صحیح</th><th>عملیات</th></tr></thead>
+      <thead><tr><th>#</th><th>شناسه</th><th>سؤال</th><th>صحیح</th><th>عملیات</th></tr></thead>
       <tbody></tbody>
     </table>
     <div class="flex" style="margin-top:10px">
-      <button id="saveSet" class="btn btn-green">ذخیره در R2 (به‌عنوان یک ست JSON)</button>
+      <button id="saveSet" class="btn btn-green">ذخیره در R2 (JSON)</button>
       <button id="clearDraft" class="btn btn-red btn-outline">حذف پیش‌نویس</button>
       <span id="status" class="right muted"></span>
     </div>
@@ -294,12 +303,14 @@ function admin2Html({ key }) {
   const api = (p) => KEY ? p + "?key=" + encodeURIComponent(KEY) : p;
 
   const courseSelect = document.getElementById("courseSelect");
+  const courseIdHint  = document.getElementById("courseIdHint");
   const courseInput  = document.getElementById("courseInput");
   const addCourseBtn = document.getElementById("addCourseBtn");
+  const renameInput  = document.getElementById("renameInput");
+  const renameBtn    = document.getElementById("renameBtn");
+  const deleteCourseBtn = document.getElementById("deleteCourseBtn");
 
   const templateSelect = document.getElementById("templateSelect");
-  const setSize        = document.getElementById("setSize");
-  const customCount    = document.getElementById("customCount");
 
   const qText = document.getElementById("qText");
   const opt1  = document.getElementById("opt1");
@@ -321,6 +332,7 @@ function admin2Html({ key }) {
 
   listLink.href = api("/admin/list");
 
+  let courses = []; // [{id,title}]
   let draft = [];
 
   function log(msg, isErr){
@@ -330,24 +342,28 @@ function admin2Html({ key }) {
     logEl.prepend(p);
   }
 
-  function refreshDraft(){
-    draftTable.innerHTML = "";
-    draft.forEach((q, i) => {
-      const tr = document.createElement("tr");
-      const sh = q.text.length > 60 ? q.text.slice(0,60) + "…" : q.text;
-      tr.innerHTML = \`<td>\${i+1}</td><td>\${sh}</td><td>\${q.correct+1}</td>
-        <td><button data-i="\${i}" class="rm btn btn-outline btn-red">حذف</button></td>\`;
-      draftTable.appendChild(tr);
-    });
-    draftCount.textContent = \`\${draft.length} سؤال\`;
+  function safeId(){
+    return ("Q" + Date.now().toString(36) + Math.random().toString(36).slice(2,6)).toUpperCase();
   }
 
-  function clearQuestionForm(){
-    qText.value = "";
-    opt1.value = ""; opt2.value = ""; opt3.value = ""; opt4.value = "";
-    correct.value = "0";
-    explanation.value = "";
-    qText.focus();
+  function refreshCoursesUI(){
+    courseSelect.innerHTML = "";
+    if(courses.length === 0){
+      courseSelect.innerHTML = '<option value="">— ابتدا درس اضافه کنید —</option>';
+      courseIdHint.textContent = "";
+      renameInput.value = "";
+      return;
+    }
+    courses.forEach(c=>{
+      const op = document.createElement("option");
+      op.value = c.id;
+      op.textContent = c.title;
+      courseSelect.appendChild(op);
+    });
+    const cur = courses.find(c=>c.id===courseSelect.value) || courses[0];
+    courseSelect.value = cur.id;
+    courseIdHint.textContent = "شناسه: " + cur.id;
+    renameInput.value = cur.title;
   }
 
   async function loadCourses(){
@@ -355,42 +371,87 @@ function admin2Html({ key }) {
       const r = await fetch(api("/admin/courses"));
       const j = await r.json();
       if(!j.ok) throw new Error(j.error || "courses fetch error");
-      const arr = j.courses || [];
-      courseSelect.innerHTML = "";
-      if(arr.length === 0){
-        const op = document.createElement("option");
-        op.value = ""; op.textContent = "— ابتدا درس اضافه کنید —";
-        courseSelect.appendChild(op);
-      }else{
-        arr.forEach(c=>{
-          const op = document.createElement("option");
-          op.value = c; op.textContent = c;
-          courseSelect.appendChild(op);
-        });
-      }
+      courses = j.courses || [];
+      refreshCoursesUI();
     }catch(e){
       courseSelect.innerHTML = '<option value="">خطا در دریافت فهرست دروس</option>';
     }
   }
 
+  courseSelect.addEventListener("change", ()=>{
+    const cur = courses.find(c=>c.id===courseSelect.value);
+    if(cur){
+      courseIdHint.textContent = "شناسه: " + cur.id;
+      renameInput.value = cur.title;
+    }
+  });
+
   addCourseBtn.addEventListener("click", async ()=>{
-    const v = (courseInput.value || "").trim();
-    if(!v){ alert("نام درس را وارد کنید"); return; }
-    if(!/^[a-z0-9_\\-]+$/i.test(v)){ alert("فقط حروف/اعداد انگلیسی و - یا _"); return; }
+    const title = (courseInput.value || "").trim();
+    if(!title){ alert("نام درس را وارد کنید"); return; }
+    // فارسی مجاز است؛ id را سرور تولید می‌کند
     const r = await fetch(api("/admin/courses"), {
       method:"POST",
       headers:{"content-type":"application/json"},
-      body: JSON.stringify({course:v})
+      body: JSON.stringify({ title })
     });
     const j = await r.json();
     if(j.ok){
-      log("درس اضافه شد: " + v);
+      log("درس اضافه شد: " + title);
       courseInput.value = "";
-      loadCourses();
+      courses = j.courses || [];
+      refreshCoursesUI();
     }else{
       alert("خطا: " + (j.error||""));
     }
   });
+
+  renameBtn.addEventListener("click", async ()=>{
+    const id = courseSelect.value;
+    if(!id){ alert("درسی انتخاب نشده."); return; }
+    const title = (renameInput.value||"").trim();
+    if(!title){ alert("نام جدید را وارد کنید."); return; }
+    const r = await fetch(api("/admin/courses"), {
+      method:"PUT",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({ id, title })
+    });
+    const j = await r.json();
+    if(j.ok){
+      log("نام درس تغییر کرد.");
+      courses = j.courses || [];
+      refreshCoursesUI();
+    }else{
+      alert("خطا: " + (j.error||""));
+    }
+  });
+
+  deleteCourseBtn.addEventListener("click", async ()=>{
+    const id = courseSelect.value;
+    if(!id){ alert("درسی انتخاب نشده."); return; }
+    if(!confirm("درس حذف شود؟ (فقط متادیتا حذف می‌شود؛ فایل‌های R2 دست‌نخورده می‌مانند)")) return;
+    const r = await fetch(api("/admin/courses&id="+encodeURIComponent(id)), { method:"DELETE" });
+    const j = await r.json();
+    if(j.ok){
+      log("درس حذف شد.");
+      courses = j.courses || [];
+      refreshCoursesUI();
+    }else{
+      alert("خطا: " + (j.error||""));
+    }
+  });
+
+  function refreshDraft(){
+    draftTable.innerHTML = "";
+    draft.forEach((q, i) => {
+      const tr = document.createElement("tr");
+      const sh = q.text.length > 60 ? q.text.slice(0,60) + "…" : q.text;
+      tr.innerHTML = \`<td>\${i+1}</td><td class="small">\${q.id}</td><td>\${sh}</td><td>\${q.correct+1}</td>
+        <td><button data-i="\${i}" class="rm btn btn-outline btn-red">حذف</button></td>\`;
+      draftTable.appendChild(tr);
+    });
+    draftCount.textContent = \`\${draft.length} سؤال\`;
+  }
 
   draftTable.addEventListener("click", (e)=>{
     const t = e.target.closest(".rm");
@@ -400,9 +461,17 @@ function admin2Html({ key }) {
     refreshDraft();
   });
 
-  clearForm.addEventListener("click", clearQuestionForm);
+  function clearQuestionForm(){
+    qText.value = "";
+    opt1.value = ""; opt2.value = ""; opt3.value = ""; opt4.value = "";
+    correct.value = "0";
+    explanation.value = "";
+    qText.focus();
+  }
 
-  addToDraft.addEventListener("click", ()=>{
+  document.getElementById("clearForm").addEventListener("click", clearQuestionForm);
+
+  document.getElementById("addToDraft").addEventListener("click", ()=>{
     const text = (qText.value||"").trim();
     const o1 = (opt1.value||"").trim();
     const o2 = (opt2.value||"").trim();
@@ -411,7 +480,7 @@ function admin2Html({ key }) {
     const c  = Number(correct.value);
     if(!text || !o1 || !o2 || !o3 || !o4){ alert("همه فیلدهای سؤال و گزینه‌ها لازم‌اند"); return; }
     draft.push({
-      id: "Q" + (Date.now().toString(36) + Math.random().toString(36).slice(2,6)).toUpperCase(),
+      id: safeId(), // شناسهٔ یکتای سؤال
       text, options:[o1,o2,o3,o4], correct:c,
       ...(explanation.value ? { explanation: explanation.value } : {})
     });
@@ -419,29 +488,18 @@ function admin2Html({ key }) {
     clearQuestionForm();
   });
 
-  clearDraft.addEventListener("click", ()=>{
+  document.getElementById("clearDraft").addEventListener("click", ()=>{
     if(confirm("کل پیش‌نویس پاک شود؟")){ draft = []; refreshDraft(); }
   });
 
-  saveSet.addEventListener("click", async ()=>{
-    const course = courseSelect.value;
+  document.getElementById("saveSet").addEventListener("click", async ()=>{
+    const courseId = courseSelect.value;
     const template = templateSelect.value;
-    if(!course){ alert("ابتدا یک درس انتخاب یا اضافه کنید"); return; }
+    if(!courseId){ alert("ابتدا یک درس انتخاب یا اضافه کنید"); return; }
     if(draft.length === 0){ alert("هیچ سؤالی در پیش‌نویس نیست"); return; }
 
-    // اگر ۵/۱۰ انتخاب شده، به همان اندازه برش می‌زنیم
-    let finalQs = draft.slice();
-    const sz = setSize.value;
-    if(sz === "5") finalQs = draft.slice(0,5);
-    else if(sz === "10") finalQs = draft.slice(0,10);
-    else if(sz === "custom"){
-      const n = parseInt(customCount.value,10);
-      if(!Number.isFinite(n) || n<=0){ alert("عدد دلخواه نامعتبر است"); return; }
-      finalQs = draft.slice(0,n);
-    }
-
-    const payload = { course, template, questions: finalQs };
-    statusEl.textContent = "در حال ذخیره...";
+    const payload = { course: courseId, template, questions: draft };
+    document.getElementById("status").textContent = "در حال ذخیره...";
     const r = await fetch(api("/admin/save-set"), {
       method:"POST",
       headers:{"content-type":"application/json"},
@@ -449,12 +507,10 @@ function admin2Html({ key }) {
     });
     const j = await r.json();
     if(j.ok){
-      statusEl.textContent = "✅ ذخیره شد: " + j.key;
+      document.getElementById("status").textContent = "✅ ذخیره شد: " + j.key;
       log("ست ذخیره شد: " + j.key);
-      // بعد از ذخیره: پیش‌نویس را نگه می‌داریم تا اگر خواستی ادامه بدی؛
-      // اگر خواستی پاک شود، خودت بزن «حذف پیش‌نویس».
     }else{
-      statusEl.textContent = "❌ " + (j.error||"خطا در ذخیره");
+      document.getElementById("status").textContent = "❌ " + (j.error||"خطا در ذخیره");
     }
   });
 
@@ -766,7 +822,7 @@ export default {
       });
     }
 
-    // API: Courses - POST (add)
+    // API: Courses - POST (add) — ورودی: { title }
     if (url.pathname === "/admin/courses" && request.method === "POST") {
       const key = url.searchParams.get("key") || "";
       if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) {
@@ -776,22 +832,71 @@ export default {
       }
       let body = {};
       try { body = await request.json(); } catch {}
-      const course = String((body.course||"").trim());
-      if (!course) {
-        return new Response(JSON.stringify({ ok: false, error: "missing course" }), {
+      const title = String((body.title||"").trim());
+      if (!title) {
+        return new Response(JSON.stringify({ ok: false, error: "missing title" }), {
           status: 400, headers: { "content-type": "application/json; charset=utf-8" }
         });
       }
-      const okName = /^[a-z0-9_-]+$/i.test(course);
-      if (!okName) {
-        return new Response(JSON.stringify({ ok: false, error: "invalid course name" }), {
+      // ساخت id امن
+      const id = makeSlugFromTitle(title);
+      const courses = await getCourses(env);
+      courses.push({ id, title });
+      await saveCourses(env, courses);
+      return new Response(JSON.stringify({ ok: true, courses }, null, 2), {
+        status: 200, headers: { "content-type": "application/json; charset=utf-8" }
+      });
+    }
+
+    // API: Courses - PUT (rename) — ورودی: { id, title }
+    if (url.pathname === "/admin/courses" && request.method === "PUT") {
+      const key = url.searchParams.get("key") || "";
+      if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) {
+        return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), {
+          status: 401, headers: { "content-type": "application/json; charset=utf-8" }
+        });
+      }
+      let body = {};
+      try { body = await request.json(); } catch {}
+      const id = String((body.id||"").trim());
+      const title = String((body.title||"").trim());
+      if (!id || !title) {
+        return new Response(JSON.stringify({ ok: false, error: "missing id/title" }), {
           status: 400, headers: { "content-type": "application/json; charset=utf-8" }
         });
       }
       const courses = await getCourses(env);
-      if (!courses.includes(course)) courses.push(course);
+      const idx = courses.findIndex(c => c.id === id);
+      if (idx === -1) {
+        return new Response(JSON.stringify({ ok: false, error: "course not found" }), {
+          status: 404, headers: { "content-type": "application/json; charset=utf-8" }
+        });
+      }
+      courses[idx].title = title; // فقط عنوان عوض می‌شود؛ id ثابت می‌ماند
       await saveCourses(env, courses);
       return new Response(JSON.stringify({ ok: true, courses }, null, 2), {
+        status: 200, headers: { "content-type": "application/json; charset=utf-8" }
+      });
+    }
+
+    // API: Courses - DELETE ?key=...&id=...
+    if (url.pathname.startsWith("/admin/courses") && request.method === "DELETE") {
+      const key = url.searchParams.get("key") || "";
+      if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) {
+        return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), {
+          status: 401, headers: { "content-type": "application/json; charset=utf-8" }
+        });
+      }
+      const id = url.searchParams.get("id") || "";
+      if (!id) {
+        return new Response(JSON.stringify({ ok: false, error: "missing id" }), {
+          status: 400, headers: { "content-type": "application/json; charset=utf-8" }
+        });
+      }
+      const courses = await getCourses(env);
+      const next = courses.filter(c => c.id !== id);
+      await saveCourses(env, next);
+      return new Response(JSON.stringify({ ok: true, courses: next }, null, 2), {
         status: 200, headers: { "content-type": "application/json; charset=utf-8" }
       });
     }
