@@ -36,42 +36,75 @@ export class RoomDO {
     return this._meUsername;
   }
 
-  // ====== R2: load question sets ======
-  async listR2(prefix) { const out = await this.env.QUESTIONS.list({ prefix, limit:1000 }); return out?.objects || []; }
+  // ====== R2: load questions ======
   async getR2Text(key) { const obj = await this.env.QUESTIONS.get(key); if (!obj) return null; return await obj.text(); }
-
-  async pickRandomSet(courseId, template) {
-    const prefix = `sets/${courseId}/${template}/`;
-    const files = await this.listR2(prefix);
-    if (!files.length) return null;
-    const f = files[Math.floor(Math.random() * files.length)];
-    const txt = await this.getR2Text(f.key);
-    if (!txt) return null;
-    let payload = {}; try { payload = JSON.parse(txt); } catch { return null; }
-    if (!Array.isArray(payload.questions)) return null;
-    return payload.questions;
-  }
-
-  async loadQuestions(courseId, template, count) {
-    if (template === "mix") {
-      const half = Math.floor(count/2), rem = count - half;
-      const kk = await this.pickRandomSet(courseId, "konkoori") || [];
-      const tt = await this.pickRandomSet(courseId, "taalifi") || [];
-      this.shuffle(kk); this.shuffle(tt);
-      let pool = kk.slice(0, half).concat(tt.slice(0, rem));
-      if (pool.length < count) {
-        const extra = kk.concat(tt); this.shuffle(extra);
-        for (const q of extra) { if (pool.length >= count) break; if (!pool.includes(q)) pool.push(q); }
-      }
-      if (pool.length < count) return null;
-      return this.shuffle(pool).slice(0, count);
-    } else {
-      const qs = await this.pickRandomSet(courseId, template);
-      if (!qs || !qs.length) return null;
-      this.shuffle(qs);
-      if (qs.length < count) { if (qs.length >= 5) return qs.slice(0, Math.min(qs.length, count)); return null; }
-      return qs.slice(0, count);
+  normalizeStoredQuestion(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const id = String(raw.id || "").trim();
+    const text = String(raw.text || "").trim();
+    if (!id || !text) return null;
+    if (!Array.isArray(raw.options) || raw.options.length !== 4) return null;
+    const options = raw.options.map(opt => String(opt || "").trim());
+    if (options.some(opt => !opt)) return null;
+    const correct = Number(raw.correct);
+    if (!Number.isInteger(correct) || correct < 0 || correct > 3) return null;
+    const question = { id, text, options, correct };
+    if (raw.explanation) {
+      const explanation = String(raw.explanation).trim();
+      if (explanation) question.explanation = explanation;
     }
+    return question;
+  }
+  async listQuestionKeys(courseId, template) {
+    const prefix = `questions/${courseId}/${template}/`;
+    const keys = [];
+    let cursor;
+    do {
+      const res = await this.env.QUESTIONS.list({ prefix, limit: 1000, cursor });
+      const objs = res?.objects || [];
+      for (const obj of objs) keys.push(obj.key);
+      cursor = res?.truncated ? res.cursor : null;
+    } while (cursor);
+    return keys;
+  }
+  async readQuestionByKey(key, courseId, template) {
+    try {
+      const txt = await this.getR2Text(key);
+      if (!txt) return null;
+      const parsed = JSON.parse(txt);
+      if (parsed.course && parsed.course !== courseId) return null;
+      if (parsed.template && parsed.template !== template && template !== "mix") return null;
+      return this.normalizeStoredQuestion(parsed);
+    } catch (err) {
+      console.error("Failed to parse question", key, err);
+      return null;
+    }
+  }
+  async loadQuestions(courseId, template, count) {
+    const templateList = template === "mix" ? ["konkoori", "taalifi"] : [template];
+    let keyPool = [];
+    for (const tpl of templateList) {
+      const keys = await this.listQuestionKeys(courseId, tpl);
+      keyPool = keyPool.concat(keys.map(k => ({ key: k, template: tpl })));
+    }
+    const seen = new Set();
+    keyPool = keyPool.filter(({ key }) => {
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    if (keyPool.length < count) return null;
+    this.shuffle(keyPool);
+    const questions = [];
+    let idx = 0;
+    while (questions.length < count && idx < keyPool.length) {
+      const entry = keyPool[idx++];
+      const q = await this.readQuestionByKey(entry.key, courseId, template === "mix" ? entry.template : template);
+      if (!q) continue;
+      questions.push(q);
+    }
+    if (questions.length < count) return null;
+    return questions.slice(0, count);
   }
 
   // ====== Game flow ======
@@ -159,7 +192,7 @@ export class RoomDO {
 
     const qs = await this.loadQuestions(data.courseId, data.template, data.modeCount);
     if (!qs || !qs.length) {
-      await this.sendMessage(data.chat_id, "❌ بانک سؤال کافی یافت نشد. برای این درس/قالب ست بیشتری در R2 آپلود کنید.");
+      await this.sendMessage(data.chat_id, "❌ بانک سؤال کافی یافت نشد. برای این درس/قالب سؤال‌های بیشتری در R2 ذخیره کنید.");
       return { ok:false, error:"no-questions" };
     }
 
