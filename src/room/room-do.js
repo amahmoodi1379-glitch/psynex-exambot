@@ -256,7 +256,11 @@ export class RoomDO {
 
     if (reviewLink) lines.push(`\n🔍 <b>مرور پاسخ‌ها (خصوصی):</b>\n${reviewLink}`);
 
-    await this.sendMessage(data.chat_id, lines.join("\n"));
+    const replyMarkup = {
+      inline_keyboard: [[{ text: "مرور گروهی", callback_data: `gr:${data.room_id}` }]],
+    };
+
+    await this.sendMessage(data.chat_id, lines.join("\n"), { reply_markup: replyMarkup });
     data.resultsPosted = true;
     await this.save(data);
   }
@@ -333,6 +337,21 @@ export class RoomDO {
     return { ok:true, text: lines.join("\n") };
   }
 
+  async buildGroupReviewText() {
+    const data = await this.load();
+    if (!data) return { ok:false, error:"no-room" };
+    if (!data.resultsPosted) return { ok:false, error:"not-ended" };
+    if (!Array.isArray(data.questions) || !data.questions.length) return { ok:false, error:"no-questions" };
+
+    const lines = [`🧾 مرور گروهی — اتاق ${data.room_id}`, ""];
+    (data.questions || []).forEach((q, i) => {
+      const correct = Number.isInteger(q?.correct) ? Number(q.correct) + 1 : 1;
+      lines.push(`سؤال ${i+1}: گزینه ${correct}`);
+    });
+
+    return { ok:true, text: lines.join("\n") };
+  }
+
   // Alarm → سوال بعدی
   async alarm() { await this.nextQuestion(); }
 
@@ -372,6 +391,10 @@ export class RoomDO {
     if (path === "/review" && request.method === "POST") {
       const { user_id } = await request.json();
       const out = await this.buildReviewText(String(user_id));
+      return new Response(JSON.stringify(out), { status:200 });
+    }
+    if (path === "/group-review" && request.method === "POST") {
+      const out = await this.buildGroupReviewText();
       return new Response(JSON.stringify(out), { status:200 });
     }
 
