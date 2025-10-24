@@ -648,6 +648,15 @@ export default {
           return false;
         }
 
+        async function removeInlineKeyboard() {
+          if (!chat_id || !msg.message_id) return;
+          await tg.call(env, "editMessageReplyMarkup", {
+            chat_id,
+            message_id: msg.message_id,
+            reply_markup: { inline_keyboard: [] },
+          });
+        }
+
         // لیست دروس
         if (act === "cl") {
           const ok = await ensureMemberOrNotify();
@@ -793,6 +802,29 @@ export default {
           if (out.ok && out.duplicate) await tg.answerCallback(env, cq.id, "قبلاً ثبت شده بود.");
           else if (out.ok) await tg.answerCallback(env, cq.id, "پاسخ ثبت شد ✅");
           else await tg.answerCallback(env, cq.id, "زمان یا حالت نامعتبر", true);
+          return new Response("ok", { status: 200 });
+        }
+
+        if (act === "gr") {
+          const r = await stub.fetch("https://do/group-review", {
+            method: "POST",
+            body: JSON.stringify({}),
+          });
+          const out = await r.json();
+          if (!out.ok) {
+            const errorMessages = {
+              "not-ended": "بازی هنوز تمام نشده است.",
+              "no-room": "اتاق پیدا نشد.",
+              "no-questions": "سؤالی برای نمایش وجود ندارد.",
+            };
+            const msgText = errorMessages[out.error] || "خطا در دریافت مرور گروهی.";
+            await tg.answerCallback(env, cq.id, msgText, true);
+            if (chat_id) await tg.sendMessage(env, chat_id, `⚠️ ${msgText}`);
+            return new Response("ok", { status: 200 });
+          }
+          await tg.answerCallback(env, cq.id, "ارسال شد ✅");
+          if (chat_id) await tg.sendMessage(env, chat_id, out.text);
+          await removeInlineKeyboard();
           return new Response("ok", { status: 200 });
         }
       }
