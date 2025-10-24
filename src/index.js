@@ -108,6 +108,15 @@ function normalizeQuestionInput(q, index, { allowMissingId = false } = {}) {
   if (explanation) normalized.explanation = explanation;
   return normalized;
 }
+function ensureUniqueQuestionIds(questions) {
+  const seen = new Set();
+  for (const q of questions) {
+    const id = q?.id;
+    if (!id) continue;
+    if (seen.has(id)) throw new Error(`Duplicate id detected: ${id}`);
+    seen.add(id);
+  }
+}
 function validateQuestionsPayload(payload) {
   if (!payload || typeof payload !== "object") return { error: "Invalid JSON" };
   const course = String((payload.course || "").trim());
@@ -124,11 +133,7 @@ function validateQuestionsPayload(payload) {
 
   try {
     const normalized = sourceQuestions.map((q, idx) => normalizeQuestionInput(q, idx));
-    const seen = new Set();
-    for (const q of normalized) {
-      if (seen.has(q.id)) throw new Error(`Duplicate id detected: ${q.id}`);
-      seen.add(q.id);
-    }
+    ensureUniqueQuestionIds(normalized);
     return { course, template, questions: normalized };
   } catch (e) {
     return { error: e.message };
@@ -478,9 +483,7 @@ code{background:#f3f4f6;border-radius:6px;padding:0 6px;font-family:ui-monospace
     importStatus.textContent = msg || "";
     importStatus.className = msg ? (isErr ? "small err" : "small ok") : "small muted";
   }
-  function safeId(){
-    return ("Q" + Date.now().toString(36) + Math.random().toString(36).slice(2,8)).toUpperCase();
-  }
+  const generateQuestionId = ${generateQuestionId.toString()};
   function refreshCoursesUI(){
     courseSelect.innerHTML = "";
     if(courses.length === 0){
@@ -606,7 +609,7 @@ code{background:#f3f4f6;border-radius:6px;padding:0 6px;font-family:ui-monospace
     if(!text || !o1 || !o2 || !o3 || !o4){ alert("همه فیلدهای سؤال و گزینه‌ها لازم‌اند"); return; }
     const expl = (explanation.value||"").trim();
     draft.push({
-      id: safeId(),
+      id: generateQuestionId(),
       text,
       options:[o1,o2,o3,o4],
       correct:c,
@@ -622,58 +625,12 @@ code{background:#f3f4f6;border-radius:6px;padding:0 6px;font-family:ui-monospace
     importBtn.addEventListener("click", async ()=>{
       const raw = (importTextarea.value||"").trim();
       if(!raw){ setImportStatus("ابتدا JSON را بچسبانید.", true); return; }
-      let parsed;
-      try{
-        parsed = JSON.parse(raw);
-      }catch{
-        setImportStatus("JSON نامعتبر است.", true);
-        return;
-      }
-      const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.questions) ? parsed.questions : null);
-      if(!list || !list.length){
-        setImportStatus("باید آرایه‌ای از سؤال‌ها باشد.", true);
-        return;
-      }
-      const prepared = [];
-      const seenLocal = new Set();
-      try{
-        list.forEach((item, idx)=>{
-          const row = idx + 1;
-          if(!item || typeof item !== "object") throw new Error("سؤال " + row + " نامعتبر است.");
-          const text = String(item.text||"").trim();
-          if(!text) throw new Error("سؤال " + row + ": متن خالی است.");
-          const options = Array.isArray(item.options) ? item.options.map(opt => String(opt||"").trim()) : [];
-          if(options.length !== 4 || options.some(opt=>!opt)) throw new Error("سؤال " + row + ": چهار گزینهٔ غیرخالی لازم است.");
-          const correct = Number(item.correct);
-          if(!Number.isInteger(correct) || correct < 0 || correct > 3) throw new Error("سؤال " + row + ": مقدار صحیح باید ۰ تا ۳ باشد.");
-          const explanationVal = item.explanation ? String(item.explanation).trim() : "";
-          let id = String(item.id||"").trim();
-          if(id){
-            id = id.replace(/[^A-Za-z0-9_-]+/g, "-");
-            if(!id) id = safeId();
-          }else{
-            id = safeId();
-          }
-          if(seenLocal.has(id)) throw new Error("شناسهٔ تکراری برای سؤال " + row + ": " + id);
-          seenLocal.add(id);
-          prepared.push({
-            id,
-            text,
-            options,
-            correct,
-            ...(explanationVal ? { explanation: explanationVal } : {})
-          });
-        });
-      }catch(err){
-        setImportStatus(err.message || "خطای اعتبارسنجی", true);
-        return;
-      }
-      setImportStatus("در حال بررسی با سرور...", false);
+      setImportStatus("در حال ارسال به سرور...", false);
       try{
         const r = await fetch(api("/admin/import-json"), {
           method:"POST",
           headers:{"content-type":"application/json"},
-          body: JSON.stringify({ questions: prepared })
+          body: raw
         });
         const j = await r.json().catch(()=>({}));
         if(!r.ok || !j.ok){
@@ -681,12 +638,17 @@ code{background:#f3f4f6;border-radius:6px;padding:0 6px;font-family:ui-monospace
           setImportStatus("❌ " + msg, true);
           return;
         }
+        const normalized = Array.isArray(j.questions) ? j.questions : [];
+        if(!normalized.length){
+          setImportStatus("❌ هیچ سؤالی از سرور بازگشت داده نشد.", true);
+          return;
+        }
         const existing = new Set(draft.map(q=>q.id));
         const added = [];
-        (j.questions||[]).forEach(q=>{
-          let newId = q.id;
+        normalized.forEach(q=>{
+          let newId = q.id || generateQuestionId();
           while(existing.has(newId)){
-            newId = safeId();
+            newId = generateQuestionId();
           }
           existing.add(newId);
           draft.push({ ...q, id: newId });
@@ -1193,11 +1155,7 @@ export default {
         return new Response(JSON.stringify({ ok: false, error: "Expected an array of questions" }), { status: 400, headers: { "content-type": "application/json; charset=utf-8" } });
       try {
         const normalized = list.map((q, idx) => normalizeQuestionInput(q, idx, { allowMissingId: true }));
-        const seen = new Set();
-        for (const q of normalized) {
-          if (seen.has(q.id)) throw new Error(`Duplicate id detected: ${q.id}`);
-          seen.add(q.id);
-        }
+        ensureUniqueQuestionIds(normalized);
         return new Response(JSON.stringify({ ok: true, questions: normalized }, null, 2), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
       } catch (e) {
         return new Response(JSON.stringify({ ok: false, error: e.message || "validation error" }), { status: 400, headers: { "content-type": "application/json; charset=utf-8" } });
