@@ -1,5 +1,7 @@
 // RoomDO: منطق بازی داخل Durable Object
 
+import { ACTIVE_TEMPLATES, KNOWN_TEMPLATES } from "../constants.js";
+
 export class RoomDO {
   constructor(state, env) {
     this.state = state;
@@ -155,7 +157,8 @@ export class RoomDO {
     if (!data) return { ok:false, error:"no-room" };
     if (data.started) return { ok:false, error:"already-started" };
     if (by_user !== data.starter_id) return { ok:false, error:"only-starter" };
-    if (!["konkoori","taalifi","mix"].includes(template)) return { ok:false, error:"invalid-template" };
+    if (!KNOWN_TEMPLATES.has(template)) return { ok:false, error:"invalid-template" };
+    if (!ACTIVE_TEMPLATES.has(template)) return { ok:false, error:"template-disabled" };
     data.template = template;
     await this.save(data);
     return { ok:true, template:data.template };

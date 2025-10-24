@@ -1,5 +1,12 @@
 import { tg } from "./bot/tg.js";
 import { getCommand, shortId } from "./utils.js";
+import {
+  ACTIVE_TEMPLATES,
+  ALLOWED_TEMPLATES,
+  KNOWN_TEMPLATES,
+  TEMPLATE_DISABLED_MESSAGE,
+  TEMPLATE_KEYS,
+} from "./constants.js";
 export { RoomDO } from "./room/room-do.js"; // Durable Object کلاس
 
 // ==============================
@@ -41,7 +48,6 @@ async function mustBeMember(env, user_id) {
 //   R2: دوره‌ها و سؤال‌ها (ادمین)
 // ==============================
 const COURSES_KEY = "admin/courses.json"; // [{id,title}]
-const ALLOWED_TEMPLATES = new Set(["konkoori", "taalifi"]);
 const QUESTIONS_PREFIX = "questions";
 
 async function getCourses(env) {
@@ -354,9 +360,11 @@ code{background:#f3f4f6;border-radius:6px;padding:0 6px;font-family:ui-monospace
       <div>
         <label>قالب سؤال</label>
         <select id="templateSelect">
-          <option value="konkoori" selected>کنکوری</option>
-          <option value="taalifi">تألیفی</option>
+          <option value="${TEMPLATE_KEYS.KONKOORI}" selected>کنکوری</option>
+          <option value="${TEMPLATE_KEYS.TAALIFI}" disabled>تألیفی (فعلاً غیرفعال)</option>
+          <option value="${TEMPLATE_KEYS.MIX}" disabled>ترکیبی (فعلاً غیرفعال)</option>
         </select>
+        <div class="small muted">قالب‌های تألیفی و ترکیبی <span style="white-space:nowrap;">فعلاً غیرفعال است.</span></div>
       </div>
       <div class="muted small" style="align-self:end">👈 تعداد سؤال را کاربر داخل بازی انتخاب می‌کند.</div>
     </div>
@@ -771,9 +779,9 @@ export default {
             inline_keyboard: [
               [{ text: "📚 انتخاب درس", callback_data: `cl:${roomId}` }],
               [
-                { text: "کنکوری", callback_data: `t:${roomId}:konkoori` },
-                { text: "تألیفی", callback_data: `t:${roomId}:taalifi` },
-                { text: "ترکیبی", callback_data: `t:${roomId}:mix` },
+                { text: "کنکوری", callback_data: `t:${roomId}:${TEMPLATE_KEYS.KONKOORI}` },
+                { text: "تألیفی (فعلاً غیرفعال)", callback_data: `tdisabled:${roomId}:${TEMPLATE_KEYS.TAALIFI}` },
+                { text: "ترکیبی (فعلاً غیرفعال)", callback_data: `tdisabled:${roomId}:${TEMPLATE_KEYS.MIX}` },
               ],
               [
                 { text: "۵ سواله", callback_data: `m:${roomId}:5` },
@@ -789,7 +797,7 @@ export default {
           await tg.sendMessage(
             env,
             chat_id,
-            "🎮 بازی جدید ساخته شد.\n۱) «📚 انتخاب درس» را بزنید.\n۲) قالب را انتخاب کنید (کنکوری/تألیفی/ترکیبی).\n۳) حالت ۵ یا ۱۰ سؤال.\n۴) شرکت‌کننده‌ها «✅ آماده‌ام»، شروع‌کننده «🟢 آغاز بازی»." + joinLine,
+            "🎮 بازی جدید ساخته شد.\n۱) «📚 انتخاب درس» را بزنید.\n۲) قالب را انتخاب کنید (فعلاً فقط کنکوری فعال است).\n۳) حالت ۵ یا ۱۰ سؤال.\n۴) شرکت‌کننده‌ها «✅ آماده‌ام»، شروع‌کننده «🟢 آغاز بازی»." + joinLine,
             { reply_markup: kb }
           );
           return new Response("ok", { status: 200 });
@@ -878,6 +886,11 @@ export default {
           });
         }
 
+        if (act === "tdisabled") {
+          await tg.answerCallback(env, cq.id, TEMPLATE_DISABLED_MESSAGE, true);
+          return new Response("ok", { status: 200 });
+        }
+
         // لیست دروس
         if (act === "cl") {
           const ok = await ensureMemberOrNotify();
@@ -924,10 +937,19 @@ export default {
 
         // انتخاب قالب
         if (act === "t") {
+          const tpl = parts[2];
+          if (!tpl || !KNOWN_TEMPLATES.has(tpl)) {
+            await tg.answerCallback(env, cq.id, "خطا", true);
+            return new Response("ok", { status: 200 });
+          }
+          if (!ACTIVE_TEMPLATES.has(tpl)) {
+            await tg.answerCallback(env, cq.id, TEMPLATE_DISABLED_MESSAGE, true);
+            return new Response("ok", { status: 200 });
+          }
+
           const ok = await ensureMemberOrNotify();
           if (!ok) return new Response("ok", { status: 200 });
 
-          const tpl = parts[2];
           const r = await stub.fetch("https://do/template", {
             method: "POST",
             body: JSON.stringify({ by_user: from.id, template: tpl }),
@@ -937,6 +959,7 @@ export default {
             await tg.answerCallback(env, cq.id,
               out.error === "only-starter" ? "فقط شروع‌کننده می‌تواند قالب را تعیین کند." :
               out.error === "already-started" ? "بازی آغاز شده." :
+              out.error === "template-disabled" ? TEMPLATE_DISABLED_MESSAGE :
               "خطا", true);
             return new Response("ok", { status: 200 });
           }
