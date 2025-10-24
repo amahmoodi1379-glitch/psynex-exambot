@@ -5,6 +5,7 @@ export class RoomDO {
     this.state = state;
     this.env = env;
     this.storage = state.storage;
+    this._advancing = false;
   }
 
   // ====== Utilities ======
@@ -179,49 +180,55 @@ export class RoomDO {
   }
 
   async nextQuestion() {
-    const data = await this.load();
-    if (!data || !data.started) return;
+    if (this._advancing) return;
+    this._advancing = true;
+    try {
+      const data = await this.load();
+      if (!data || !data.started) return;
 
-    // بستن کیبورد سؤال قبلی
-    if (data.questionMessageId) {
-      await this.editMarkup(data.chat_id, data.questionMessageId, { inline_keyboard: [] });
+      // بستن کیبورد سؤال قبلی
+      if (data.questionMessageId) {
+        await this.editMarkup(data.chat_id, data.questionMessageId, { inline_keyboard: [] });
+      }
+
+      data.currentIndex += 1;
+
+      if (data.currentIndex >= data.questions.length) {
+        await this.finishGame();
+        return;
+      }
+
+      const q = data.questions[data.currentIndex];
+      const n = data.currentIndex + 1, total = data.questions.length;
+      const text = [
+        `❓ <b>سؤال ${n}/${total}</b>`, "",
+        q.text, "",
+        `۱) ${q.options[0]}`,
+        `۲) ${q.options[1]}`,
+        `۳) ${q.options[2]}`,
+        `۴) ${q.options[3]}`
+      ].join("\n");
+
+      const kb = { inline_keyboard: [[
+        { text:"۱", callback_data:`a:${data.room_id}:${data.currentIndex}:0` },
+        { text:"۲", callback_data:`a:${data.room_id}:${data.currentIndex}:1` },
+        { text:"۳", callback_data:`a:${data.room_id}:${data.currentIndex}:2` },
+        { text:"۴", callback_data:`a:${data.room_id}:${data.currentIndex}:3` },
+      ]]};
+
+      const sent = await this.sendMessage(data.chat_id, text, { reply_markup: kb });
+      const mid = sent?.result?.message_id || null;
+      const deadline = this.now() + 60*1000;
+
+      data.questionMessageId = mid;
+      data.questionDeadline = deadline;
+      data.qStartTs = this.now();
+      await this.save(data);
+
+      await this.state.storage.setAlarm(new Date(deadline));
+    } finally {
+      this._advancing = false;
     }
-
-    data.currentIndex += 1;
-
-    if (data.currentIndex >= data.questions.length) {
-      await this.finishGame();
-      return;
-    }
-
-    const q = data.questions[data.currentIndex];
-    const n = data.currentIndex + 1, total = data.questions.length;
-    const text = [
-      `❓ <b>سؤال ${n}/${total}</b>`, "",
-      q.text, "",
-      `۱) ${q.options[0]}`,
-      `۲) ${q.options[1]}`,
-      `۳) ${q.options[2]}`,
-      `۴) ${q.options[3]}`
-    ].join("\n");
-
-    const kb = { inline_keyboard: [[
-      { text:"۱", callback_data:`a:${data.room_id}:${data.currentIndex}:0` },
-      { text:"۲", callback_data:`a:${data.room_id}:${data.currentIndex}:1` },
-      { text:"۳", callback_data:`a:${data.room_id}:${data.currentIndex}:2` },
-      { text:"۴", callback_data:`a:${data.room_id}:${data.currentIndex}:3` },
-    ]]};
-
-    const sent = await this.sendMessage(data.chat_id, text, { reply_markup: kb });
-    const mid = sent?.result?.message_id || null;
-    const deadline = this.now() + 60*1000;
-
-    data.questionMessageId = mid;
-    data.questionDeadline = deadline;
-    data.qStartTs = this.now();
-    await this.save(data);
-
-    await this.state.storage.setAlarm(new Date(deadline));
   }
 
   async finishGame() {
@@ -286,13 +293,15 @@ export class RoomDO {
 
     await this.save(data);
 
-    const allAnswered = Array.isArray(data.allowedUsers)
-      && data.allowedUsers.every(uid => {
-        const participant = data.participants[uid];
-        return participant?.answers?.[qIndex];
-      });
+    const participants = data && typeof data.participants === "object" ? data.participants : {};
+    const allowedUsers = Array.isArray(data.allowedUsers) ? data.allowedUsers : [];
+    const answeredCount = allowedUsers.reduce((count, uid) => {
+      const answers = participants?.[uid]?.answers;
+      return Array.isArray(answers) && answers[qIndex] ? count + 1 : count;
+    }, 0);
+    const allAnswered = allowedUsers.length > 0 && answeredCount === allowedUsers.length;
 
-    if (allAnswered) {
+    if (allAnswered && !this._advancing) {
       await this.nextQuestion();
     }
 
