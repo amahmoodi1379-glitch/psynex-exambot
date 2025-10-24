@@ -638,13 +638,14 @@ code{background:#f3f4f6;border-radius:6px;padding:0 6px;font-family:ui-monospace
       const seenLocal = new Set();
       try{
         list.forEach((item, idx)=>{
-          if(!item || typeof item !== "object") throw new Error(`سؤال ${idx+1} نامعتبر است.`);
+          const row = idx + 1;
+          if(!item || typeof item !== "object") throw new Error("سؤال " + row + " نامعتبر است.");
           const text = String(item.text||"").trim();
-          if(!text) throw new Error(`سؤال ${idx+1}: متن خالی است.`);
+          if(!text) throw new Error("سؤال " + row + ": متن خالی است.");
           const options = Array.isArray(item.options) ? item.options.map(opt => String(opt||"").trim()) : [];
-          if(options.length !== 4 || options.some(opt=>!opt)) throw new Error(`سؤال ${idx+1}: چهار گزینهٔ غیرخالی لازم است.`);
+          if(options.length !== 4 || options.some(opt=>!opt)) throw new Error("سؤال " + row + ": چهار گزینهٔ غیرخالی لازم است.");
           const correct = Number(item.correct);
-          if(!Number.isInteger(correct) || correct < 0 || correct > 3) throw new Error(`سؤال ${idx+1}: مقدار صحیح باید ۰ تا ۳ باشد.`);
+          if(!Number.isInteger(correct) || correct < 0 || correct > 3) throw new Error("سؤال " + row + ": مقدار صحیح باید ۰ تا ۳ باشد.");
           const explanationVal = item.explanation ? String(item.explanation).trim() : "";
           let id = String(item.id||"").trim();
           if(id){
@@ -653,7 +654,7 @@ code{background:#f3f4f6;border-radius:6px;padding:0 6px;font-family:ui-monospace
           }else{
             id = safeId();
           }
-          if(seenLocal.has(id)) throw new Error(`شناسهٔ تکراری برای سؤال ${idx+1}: ${id}`);
+          if(seenLocal.has(id)) throw new Error("شناسهٔ تکراری برای سؤال " + row + ": " + id);
           seenLocal.add(id);
           prepared.push({
             id,
@@ -676,8 +677,8 @@ code{background:#f3f4f6;border-radius:6px;padding:0 6px;font-family:ui-monospace
         });
         const j = await r.json().catch(()=>({}));
         if(!r.ok || !j.ok){
-          const msg = j && j.error ? j.error : `خطا ${r.status}`;
-          setImportStatus(`❌ ${msg}`, true);
+          const msg = j && j.error ? j.error : "خطا " + r.status;
+          setImportStatus("❌ " + msg, true);
           return;
         }
         const existing = new Set(draft.map(q=>q.id));
@@ -693,9 +694,9 @@ code{background:#f3f4f6;border-radius:6px;padding:0 6px;font-family:ui-monospace
         });
         refreshDraft();
         importTextarea.value = "";
-        setImportStatus(`✅ ${added.length} سؤال اضافه شد.`, false);
+        setImportStatus("✅ " + added.length + " سؤال اضافه شد.", false);
         if(added.length){
-          log(`افزودن از JSON: ${added.join(", ")}`);
+          log("افزودن از JSON: " + added.join(", "));
         }
       }catch(err){
         setImportStatus("❌ خطا در ارتباط با سرور", true);
