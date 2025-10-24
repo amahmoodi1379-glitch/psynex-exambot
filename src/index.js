@@ -597,14 +597,14 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
     if(j.ok){
       const saved = Array.isArray(j.keys) ? j.keys.length : 0;
       const skipped = Array.isArray(j.skipped) ? j.skipped.length : 0;
-      statusEl.textContent = `✅ ${saved} سؤال ذخیره شد${skipped ? `، ${skipped} مورد از قبل وجود داشت` : ""}.`;
+      statusEl.textContent = "✅ " + saved + " سؤال ذخیره شد" + (skipped ? "، " + skipped + " مورد از قبل وجود داشت" : "") + ".";
       draft = [];
       refreshDraft();
       if(saved){
-        log(`سؤال‌ها ذخیره شد (${saved}): ${j.keys.join(", ")}`);
+        log("سؤال‌ها ذخیره شد (" + saved + "): " + j.keys.join(", "));
       }
       if(skipped){
-        log(`⏭️ ${skipped} سؤال از قبل در R2 وجود داشت و رد شد.`);
+        log("⏭️ " + skipped + " سؤال از قبل در R2 وجود داشت و رد شد.");
       }
     }else{
       statusEl.textContent = "❌ " + (j.error||"خطا در ذخیره");
