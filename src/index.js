@@ -245,6 +245,16 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
   </div>
 
   <div class="card">
+    <div class="flex"><div><b>گام ۳.۵:</b> وارد کردن JSON مجموعه</div></div>
+    <label>چسباندن JSON مجموعه سؤالات</label>
+    <textarea id="bulkJson" placeholder='{"course":"...","template":"konkoori","questions":[...]}'></textarea>
+    <div class="flex" style="margin-top:10px">
+      <button id="uploadJson" class="btn btn-outline">بارگذاری JSON</button>
+      <div class="muted small">با وارد کردن JSON کامل، سؤالات به پیش‌نویس افزوده می‌شود.</div>
+    </div>
+  </div>
+
+  <div class="card">
     <div class="flex">
       <div><b>گام ۴:</b> پیش‌نویس ست</div>
       <div class="right"><span class="pill" id="draftCount">۰ سؤال</span></div>
@@ -302,6 +312,8 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
   const statusEl   = document.getElementById("status");
   const listLink   = document.getElementById("listLink");
   const logEl      = document.getElementById("log");
+  const bulkJson   = document.getElementById("bulkJson");
+  const uploadJson = document.getElementById("uploadJson");
 
   listLink.href = api("/admin/list");
 
@@ -316,6 +328,23 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
   }
   function safeId(){
     return ("Q" + Date.now().toString(36) + Math.random().toString(36).slice(2,6)).toUpperCase();
+  }
+  function validateImportedSet(payload){
+    if(!payload || typeof payload !== "object") return "JSON نامعتبر است.";
+    if(payload.template && !["konkoori","taalifi"].includes(payload.template)) return "template نامعتبر است.";
+    if(!Array.isArray(payload.questions) || payload.questions.length === 0) return "آرایهٔ questions خالی است.";
+    for(let i=0;i<payload.questions.length;i++){
+      const q = payload.questions[i];
+      if(!q || typeof q !== "object") return `سؤال ${i+1}: ساختار نامعتبر است.`;
+      if(!q.id || typeof q.id !== "string") return `سؤال ${i+1}: شناسه (id) نامعتبر است.`;
+      if(!q.text || typeof q.text !== "string") return `سؤال ${i+1}: متن سؤال خالی است.`;
+      if(!Array.isArray(q.options) || q.options.length !== 4) return `سؤال ${i+1}: گزینه‌ها باید ۴ مورد باشند.`;
+      for(let j=0;j<4;j++){
+        if(typeof q.options[j] !== "string" || !q.options[j].trim()) return `سؤال ${i+1}: گزینه ${j+1} خالی است.`;
+      }
+      if(typeof q.correct !== "number" || q.correct < 0 || q.correct > 3) return `سؤال ${i+1}: شماره گزینه صحیح باید ۰ تا ۳ باشد.`;
+    }
+    return null;
   }
   function refreshCoursesUI(){
     courseSelect.innerHTML = "";
@@ -447,6 +476,53 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
     });
     refreshDraft();
     qText.value = ""; opt1.value = ""; opt2.value = ""; opt3.value = ""; opt4.value = ""; correct.value = "0"; explanation.value = "";
+  });
+  uploadJson.addEventListener("click", ()=>{
+    const raw = (bulkJson.value || "").trim();
+    statusEl.textContent = "";
+    if(!raw){
+      statusEl.textContent = "❌ ابتدا JSON را وارد کنید.";
+      return;
+    }
+    let payload;
+    try{
+      payload = JSON.parse(raw);
+    }catch(e){
+      statusEl.textContent = "❌ خطا در JSON: " + (e.message || "parse error");
+      return;
+    }
+    const err = validateImportedSet(payload);
+    if(err){
+      statusEl.textContent = "❌ " + err;
+      return;
+    }
+    let note = "";
+    if(payload.course){
+      const exists = courses.find(c=>c.id===payload.course);
+      if(exists){
+        courseSelect.value = exists.id;
+        courseIdHint.textContent = "شناسه: " + exists.id;
+        renameInput.value = exists.title;
+        courseSelect.dispatchEvent(new Event("change"));
+      }else{
+        note = " (⚠️ درس در فهرست فعلی یافت نشد)";
+      }
+    }
+    if(payload.template && ["konkoori","taalifi"].includes(payload.template)){
+      templateSelect.value = payload.template;
+    }
+    payload.questions.forEach(q=>{
+      draft.push({
+        id: q.id.trim(),
+        text: q.text.trim(),
+        options: q.options.map(opt => opt.trim()),
+        correct: q.correct,
+        ...(q.explanation ? { explanation: String(q.explanation).trim() } : {})
+      });
+    });
+    refreshDraft();
+    bulkJson.value = "";
+    statusEl.textContent = "✅ " + payload.questions.length + " سؤال از JSON اضافه شد." + note;
   });
   document.getElementById("clearDraft").addEventListener("click", ()=>{
     if(confirm("کل پیش‌نویس پاک شود؟")){ draft = []; refreshDraft(); }
