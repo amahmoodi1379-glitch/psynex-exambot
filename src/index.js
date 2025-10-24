@@ -38,10 +38,11 @@ async function mustBeMember(env, user_id) {
 }
 
 // ==============================
-//   R2: دوره‌ها و ست‌ها (ادمین)
+//   R2: دوره‌ها و سؤال‌ها (ادمین)
 // ==============================
 const COURSES_KEY = "admin/courses.json"; // [{id,title}]
 const ALLOWED_TEMPLATES = new Set(["konkoori", "taalifi"]);
+const QUESTIONS_PREFIX = "questions";
 
 async function getCourses(env) {
   try {
@@ -71,49 +72,178 @@ function makeSlugFromTitle(title) {
   const suffix = Math.random().toString(36).slice(2, 6);
   return `${core}-${suffix}`;
 }
-function validateQuestionSet(payload) {
-  // { course, template, questions: [{id,text,options[4],correct(0..3),explanation?}, ...] }
-  if (!payload || typeof payload !== "object") return "Invalid JSON";
-  if (!payload.course || typeof payload.course !== "string") return "Missing 'course'";
-  if (!payload.template || typeof payload.template !== "string") return "Missing 'template'";
-  if (!ALLOWED_TEMPLATES.has(payload.template)) return "template must be 'konkoori' or 'taalifi'";
-  if (!Array.isArray(payload.questions) || payload.questions.length === 0) return "No questions[]";
-  for (let i = 0; i < payload.questions.length; i++) {
-    const q = payload.questions[i];
-    if (!q || typeof q !== "object") return `Question ${i + 1}: invalid`;
-    if (!q.id || typeof q.id !== "string") return `Question ${i + 1}: missing 'id'`;
-    if (!q.text || typeof q.text !== "string") return `Question ${i + 1}: missing 'text'`;
-    if (!Array.isArray(q.options) || q.options.length !== 4) return `Question ${i + 1}: options must be 4`;
-    if (typeof q.correct !== "number" || q.correct < 0 || q.correct > 3) return `Question ${i + 1}: correct must be 0..3`;
+function sanitizeQuestionId(id, index) {
+  const val = String(id || "").trim();
+  if (!val) throw new Error(`Question ${index + 1}: missing 'id'`);
+  const safe = val.replace(/[^A-Za-z0-9_-]+/g, "-");
+  if (!safe) throw new Error(`Question ${index + 1}: invalid id`);
+  return safe;
+}
+function normalizeQuestionInput(q, index) {
+  if (!q || typeof q !== "object") throw new Error(`Question ${index + 1}: invalid`);
+  const id = sanitizeQuestionId(q.id, index);
+  const text = String(q.text || "").trim();
+  if (!text) throw new Error(`Question ${index + 1}: missing 'text'`);
+  if (!Array.isArray(q.options) || q.options.length !== 4)
+    throw new Error(`Question ${index + 1}: options must be 4`);
+  const options = q.options.map((opt, optIdx) => {
+    const val = String(opt || "").trim();
+    if (!val) throw new Error(`Question ${index + 1}: option ${optIdx + 1} empty`);
+    return val;
+  });
+  const correct = Number(q.correct);
+  if (!Number.isInteger(correct) || correct < 0 || correct > 3)
+    throw new Error(`Question ${index + 1}: correct must be 0..3`);
+  const explanation = q.explanation ? String(q.explanation).trim() : undefined;
+  const normalized = { id, text, options, correct };
+  if (explanation) normalized.explanation = explanation;
+  return normalized;
+}
+function validateQuestionsPayload(payload) {
+  if (!payload || typeof payload !== "object") return { error: "Invalid JSON" };
+  const course = String((payload.course || "").trim());
+  if (!course) return { error: "Missing 'course'" };
+  const template = String((payload.template || "").trim());
+  if (!template) return { error: "Missing 'template'" };
+  if (!ALLOWED_TEMPLATES.has(template)) return { error: "template must be 'konkoori' or 'taalifi'" };
+
+  let sourceQuestions = [];
+  if (Array.isArray(payload.questions)) sourceQuestions = payload.questions;
+  else if (payload.question && typeof payload.question === "object") sourceQuestions = [payload.question];
+  else if (payload.id && payload.text && payload.options) sourceQuestions = [payload];
+  if (!sourceQuestions.length) return { error: "No questions provided" };
+
+  try {
+    const normalized = sourceQuestions.map((q, idx) => normalizeQuestionInput(q, idx));
+    return { course, template, questions: normalized };
+  } catch (e) {
+    return { error: e.message };
   }
-  return null;
 }
-async function putQuestionSetToR2(env, payload) {
-  const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  const rand = Math.random().toString(36).slice(2, 8);
-  const key = `sets/${payload.course}/${payload.template}/${ts}-${rand}.json`;
-  const body = JSON.stringify(payload, null, 2);
-  await env.QUESTIONS.put(key, body, { httpMetadata: { contentType: "application/json; charset=utf-8" } });
-  return key;
+function makeQuestionKey(course, template, questionId) {
+  return `${QUESTIONS_PREFIX}/${course}/${template}/${questionId}.json`;
 }
-async function listQuestionSets(env, { course, template, prefixOnly } = {}) {
-  let prefix = "sets/";
+async function listQuestionObjects(env, { course, template, prefixOnly } = {}) {
+  let prefix = `${QUESTIONS_PREFIX}/`;
   if (course) prefix += `${course}/`;
   if (template) prefix += `${template}/`;
-  const all = await env.QUESTIONS.list({ prefix, limit: 1000 });
-  const items = (all?.objects || []).map(o => ({ key: o.key, size: o.size, uploaded: o.uploaded }));
-  if (prefixOnly) {
-    const set = new Set();
-    for (const it of items) {
-      const parts = it.key.split("/");
-      if (parts.length >= 4) set.add(`${parts[1]}:${parts[2]}`);
+  const objects = [];
+  let cursor;
+  do {
+    const res = await env.QUESTIONS.list({ prefix, limit: 1000, cursor });
+    const batch = res?.objects || [];
+    for (const obj of batch) {
+      const parts = obj.key.split("/");
+      if (parts.length < 4) continue;
+      const questionId = parts[3]?.replace(/\.json$/, "") || "";
+      objects.push({
+        key: obj.key,
+        course: parts[1] || null,
+        template: parts[2] || null,
+        questionId,
+        size: obj.size,
+        uploaded: obj.uploaded,
+      });
     }
-    return Array.from(set).sort().map(s => {
-      const [c, t] = s.split(":");
-      return { course: c, template: t };
+    cursor = res?.truncated ? res.cursor : null;
+  } while (cursor);
+  if (prefixOnly) {
+    const seen = new Map();
+    for (const obj of objects) {
+      const key = `${obj.course || ""}:${obj.template || ""}`;
+      if (!seen.has(key)) seen.set(key, { course: obj.course, template: obj.template });
+    }
+    return Array.from(seen.values()).sort((a, b) => {
+      const courseA = a.course || "";
+      const courseB = b.course || "";
+      if (courseA === courseB) return (a.template || "").localeCompare(b.template || "");
+      return courseA.localeCompare(courseB);
     });
   }
-  return items;
+  return objects;
+}
+async function readQuestionObject(env, key) {
+  try {
+    const obj = await env.QUESTIONS.get(key);
+    if (!obj) return null;
+    const txt = await obj.text();
+    const parsed = JSON.parse(txt);
+    const normalized = normalizeQuestionInput(parsed, 0);
+    const parts = key.split("/");
+    const fallbackCourse = parts[1] || null;
+    const fallbackTemplate = parts[2] || null;
+    return {
+      ...normalized,
+      course: parsed.course || fallbackCourse,
+      template: parsed.template || fallbackTemplate,
+      savedAt: parsed.savedAt || null,
+    };
+  } catch (err) {
+    console.error("Failed to read question", key, err);
+    return null;
+  }
+}
+async function putQuestionsToR2(env, { course, template, questions }, { skipExisting = false } = {}) {
+  const keys = [];
+  const skipped = [];
+  for (const q of questions) {
+    const key = makeQuestionKey(course, template, q.id);
+    if (skipExisting) {
+      const head = await env.QUESTIONS.head(key);
+      if (head) {
+        skipped.push(key);
+        continue;
+      }
+    }
+    const payload = {
+      ...q,
+      course,
+      template,
+      savedAt: q.savedAt || new Date().toISOString(),
+    };
+    await env.QUESTIONS.put(key, JSON.stringify(payload, null, 2), {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+    });
+    keys.push(key);
+  }
+  return { keys, skipped };
+}
+async function migrateLegacySets(env) {
+  const results = {
+    setsProcessed: 0,
+    totalQuestions: 0,
+    written: 0,
+    skipped: 0,
+    writtenKeys: [],
+    skippedKeys: [],
+    errors: [],
+  };
+  let cursor;
+  do {
+    const res = await env.QUESTIONS.list({ prefix: "sets/", limit: 1000, cursor });
+    const objects = res?.objects || [];
+    for (const obj of objects) {
+      results.setsProcessed += 1;
+      try {
+        const file = await env.QUESTIONS.get(obj.key);
+        if (!file) throw new Error("object missing");
+        const txt = await file.text();
+        const parsed = JSON.parse(txt);
+        const { error, course, template, questions } = validateQuestionsPayload(parsed);
+        if (error) throw new Error(error);
+        results.totalQuestions += questions.length;
+        const { keys, skipped } = await putQuestionsToR2(env, { course, template, questions }, { skipExisting: true });
+        results.written += keys.length;
+        results.skipped += skipped.length;
+        results.writtenKeys.push(...keys);
+        results.skippedKeys.push(...skipped);
+      } catch (err) {
+        results.errors.push({ key: obj.key, error: err.message || String(err) });
+      }
+    }
+    cursor = res?.truncated ? res.cursor : null;
+  } while (cursor);
+  return results;
 }
 
 // ==============================
@@ -193,7 +323,7 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
         <div class="flex">
           <button id="deleteCourseBtn" class="btn btn-red btn-outline">حذف این درس</button>
         </div>
-        <div class="small muted">حذف فقط متادیتا را پاک می‌کند؛ فایل‌های ست قبلی حذف نمی‌شوند.</div>
+        <div class="small muted">حذف فقط متادیتا را پاک می‌کند؛ فایل‌های سؤال‌ها دست‌نخورده می‌مانند.</div>
       </div>
     </div>
   </div>
@@ -246,7 +376,7 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
 
   <div class="card">
     <div class="flex">
-      <div><b>گام ۴:</b> پیش‌نویس ست</div>
+      <div><b>گام ۴:</b> پیش‌نویس سؤال‌ها</div>
       <div class="right"><span class="pill" id="draftCount">۰ سؤال</span></div>
     </div>
     <table id="draftTable">
@@ -254,7 +384,7 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
       <tbody></tbody>
     </table>
     <div class="flex" style="margin-top:10px">
-      <button id="saveSet" class="btn btn-green">ذخیره در R2 (JSON)</button>
+      <button id="saveSet" class="btn btn-green">ذخیره سؤال‌ها در R2</button>
       <button id="clearDraft" class="btn btn-red btn-outline">حذف پیش‌نویس</button>
       <span id="status" class="right muted"></span>
     </div>
@@ -263,7 +393,7 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
   <div class="card">
     <div class="flex">
       <div><b>گزارش</b></div>
-      <div class="right"><a id="listLink" target="_blank">مشاهدهٔ فهرست ست‌ها</a></div>
+      <div class="right"><a id="listLink" target="_blank">مشاهدهٔ فهرست سؤال‌ها</a></div>
     </div>
     <div id="log" class="muted"></div>
   </div>
@@ -457,7 +587,7 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
     if(!courseId){ alert("ابتدا یک درس انتخاب یا اضافه کنید"); return; }
     if(draft.length === 0){ alert("هیچ سؤالی در پیش‌نویس نیست"); return; }
     const payload = { course: courseId, template, questions: draft };
-    document.getElementById("status").textContent = "در حال ذخیره...";
+    statusEl.textContent = "در حال ذخیره...";
     const r = await fetch(api("/admin/save-set"), {
       method:"POST",
       headers:{"content-type":"application/json"},
@@ -465,10 +595,17 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
     });
     const j = await r.json();
     if(j.ok){
-      statusEl.textContent = "✅ ذخیره شد: " + j.key + " (پیش‌نویس پاک شد)";
+      const saved = Array.isArray(j.keys) ? j.keys.length : 0;
+      const skipped = Array.isArray(j.skipped) ? j.skipped.length : 0;
+      statusEl.textContent = "✅ " + saved + " سؤال ذخیره شد" + (skipped ? "، " + skipped + " مورد از قبل وجود داشت" : "") + ".";
       draft = [];
       refreshDraft();
-      log("ست ذخیره شد: " + j.key);
+      if(saved){
+        log("سؤال‌ها ذخیره شد (" + saved + "): " + j.keys.join(", "));
+      }
+      if(skipped){
+        log("⏭️ " + skipped + " سؤال از قبل در R2 وجود داشت و رد شد.");
+      }
     }else{
       statusEl.textContent = "❌ " + (j.error||"خطا در ذخیره");
     }
@@ -839,7 +976,7 @@ export default {
       return admin2Html({ key });
     }
 
-    // لیست ست‌ها
+    // لیست سؤال‌ها
     if (url.pathname === "/admin/list" && request.method === "GET") {
       const key = url.searchParams.get("key") || "";
       if (!env.ADMIN_KEY || key !== env.ADMIN_KEY)
@@ -847,7 +984,7 @@ export default {
       const course = url.searchParams.get("course") || "";
       const template = url.searchParams.get("template") || "";
       const prefixOnly = url.searchParams.get("pairs") === "1";
-      const items = await listQuestionSets(env, { course: course || undefined, template: template || undefined, prefixOnly });
+      const items = await listQuestionObjects(env, { course: course || undefined, template: template || undefined, prefixOnly });
       return new Response(JSON.stringify({ ok: true, items }, null, 2), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
     }
 
@@ -903,18 +1040,30 @@ export default {
       return new Response(JSON.stringify({ ok: true, courses: next }, null, 2), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
     }
 
-    // Save set
+    if (url.pathname === "/admin/migrate-sets" && request.method === "POST") {
+      const key = url.searchParams.get("key") || "";
+      if (!env.ADMIN_KEY || key !== env.ADMIN_KEY)
+        return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), { status: 401, headers: { "content-type": "application/json; charset=utf-8" } });
+      try {
+        const results = await migrateLegacySets(env);
+        return new Response(JSON.stringify({ ok: true, ...results }, null, 2), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: e.message || "migration error" }), { status: 500, headers: { "content-type": "application/json; charset=utf-8" } });
+      }
+    }
+
+    // Save questions
     if (url.pathname === "/admin/save-set" && request.method === "POST") {
       const key = url.searchParams.get("key") || "";
       if (!env.ADMIN_KEY || key !== env.ADMIN_KEY)
         return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), { status: 401, headers: { "content-type": "application/json; charset=utf-8" } });
       let payload = {}; try { payload = await request.json(); } catch {}
-      const err = validateQuestionSet(payload);
-      if (err)
-        return new Response(JSON.stringify({ ok: false, error: err }), { status: 400, headers: { "content-type": "application/json; charset=utf-8" } });
+      const { error, course, template, questions } = validateQuestionsPayload(payload);
+      if (error)
+        return new Response(JSON.stringify({ ok: false, error }), { status: 400, headers: { "content-type": "application/json; charset=utf-8" } });
       try {
-        const keySaved = await putQuestionSetToR2(env, payload);
-        return new Response(JSON.stringify({ ok: true, key: keySaved }, null, 2), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
+        const { keys, skipped } = await putQuestionsToR2(env, { course, template, questions });
+        return new Response(JSON.stringify({ ok: true, keys, skipped }, null, 2), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
       } catch (e) {
         return new Response(JSON.stringify({ ok: false, error: "R2 put error" }), { status: 500, headers: { "content-type": "application/json; charset=utf-8" } });
       }
