@@ -1,7 +1,6 @@
 // RoomDO: منطق بازی داخل Durable Object
 
-const ACTIVE_TEMPLATES = new Set(["konkoori"]);
-const KNOWN_TEMPLATES = new Set(["konkoori", "taalifi", "mix"]);
+import { ACTIVE_TEMPLATES, KNOWN_TEMPLATES } from "../constants.js";
 
 export class RoomDO {
   constructor(state, env) {

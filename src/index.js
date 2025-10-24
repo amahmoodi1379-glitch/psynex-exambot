@@ -1,5 +1,12 @@
 import { tg } from "./bot/tg.js";
 import { getCommand, shortId } from "./utils.js";
+import {
+  ACTIVE_TEMPLATES,
+  ALLOWED_TEMPLATES,
+  KNOWN_TEMPLATES,
+  TEMPLATE_DISABLED_MESSAGE,
+  TEMPLATE_KEYS,
+} from "./constants.js";
 export { RoomDO } from "./room/room-do.js"; // Durable Object کلاس
 
 // ==============================
@@ -41,11 +48,6 @@ async function mustBeMember(env, user_id) {
 //   R2: دوره‌ها و سؤال‌ها (ادمین)
 // ==============================
 const COURSES_KEY = "admin/courses.json"; // [{id,title}]
-const ALLOWED_TEMPLATES = new Set(["konkoori", "taalifi"]);
-const ACTIVE_TEMPLATES = new Set(["konkoori"]);
-const INACTIVE_TEMPLATES = new Set(["taalifi", "mix"]);
-const KNOWN_TEMPLATES = new Set([...ACTIVE_TEMPLATES, ...INACTIVE_TEMPLATES]);
-const TEMPLATE_DISABLED_MESSAGE = "فعلاً غیرفعال است";
 const QUESTIONS_PREFIX = "questions";
 
 async function getCourses(env) {
@@ -358,9 +360,9 @@ code{background:#f3f4f6;border-radius:6px;padding:0 6px;font-family:ui-monospace
       <div>
         <label>قالب سؤال</label>
         <select id="templateSelect">
-          <option value="konkoori" selected>کنکوری</option>
-          <option value="taalifi" disabled>تألیفی (فعلاً غیرفعال)</option>
-          <option value="mix" disabled>ترکیبی (فعلاً غیرفعال)</option>
+          <option value="${TEMPLATE_KEYS.KONKOORI}" selected>کنکوری</option>
+          <option value="${TEMPLATE_KEYS.TAALIFI}" disabled>تألیفی (فعلاً غیرفعال)</option>
+          <option value="${TEMPLATE_KEYS.MIX}" disabled>ترکیبی (فعلاً غیرفعال)</option>
         </select>
         <div class="small muted">قالب‌های تألیفی و ترکیبی <span style="white-space:nowrap;">فعلاً غیرفعال است.</span></div>
       </div>
@@ -777,9 +779,9 @@ export default {
             inline_keyboard: [
               [{ text: "📚 انتخاب درس", callback_data: `cl:${roomId}` }],
               [
-                { text: "کنکوری", callback_data: `t:${roomId}:konkoori` },
-                { text: "تألیفی (فعلاً غیرفعال)", callback_data: `tdisabled:${roomId}:taalifi` },
-                { text: "ترکیبی (فعلاً غیرفعال)", callback_data: `tdisabled:${roomId}:mix` },
+                { text: "کنکوری", callback_data: `t:${roomId}:${TEMPLATE_KEYS.KONKOORI}` },
+                { text: "تألیفی (فعلاً غیرفعال)", callback_data: `tdisabled:${roomId}:${TEMPLATE_KEYS.TAALIFI}` },
+                { text: "ترکیبی (فعلاً غیرفعال)", callback_data: `tdisabled:${roomId}:${TEMPLATE_KEYS.MIX}` },
               ],
               [
                 { text: "۵ سواله", callback_data: `m:${roomId}:5` },
