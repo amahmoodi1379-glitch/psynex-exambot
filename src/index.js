@@ -465,13 +465,12 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
     });
     const j = await r.json();
     if(j.ok){
-      const statusEl = document.getElementById("status");
       statusEl.textContent = "✅ ذخیره شد: " + j.key + " (پیش‌نویس پاک شد)";
       draft = [];
       refreshDraft();
       log("ست ذخیره شد: " + j.key);
     }else{
-      document.getElementById("status").textContent = "❌ " + (j.error||"خطا در ذخیره");
+      statusEl.textContent = "❌ " + (j.error||"خطا در ذخیره");
     }
   });
   loadCourses();
