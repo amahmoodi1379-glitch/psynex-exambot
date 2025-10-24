@@ -285,6 +285,17 @@ export class RoomDO {
     p.answers[qIndex] = { option: Number(option), ok, ms: elapsed };
 
     await this.save(data);
+
+    const allAnswered = Array.isArray(data.allowedUsers)
+      && data.allowedUsers.every(uid => {
+        const participant = data.participants[uid];
+        return participant?.answers?.[qIndex];
+      });
+
+    if (allAnswered) {
+      await this.nextQuestion();
+    }
+
     return { ok:true, duplicate:false };
   }
 
