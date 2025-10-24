@@ -72,16 +72,25 @@ function makeSlugFromTitle(title) {
   const suffix = Math.random().toString(36).slice(2, 6);
   return `${core}-${suffix}`;
 }
-function sanitizeQuestionId(id, index) {
-  const val = String(id || "").trim();
-  if (!val) throw new Error(`Question ${index + 1}: missing 'id'`);
+function generateQuestionId() {
+  return ("Q" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)).toUpperCase();
+}
+function sanitizeQuestionId(id, index, { allowGenerate = false } = {}) {
+  let val = String(id || "").trim();
+  if (!val) {
+    if (allowGenerate) return generateQuestionId();
+    throw new Error(`Question ${index + 1}: missing 'id'`);
+  }
   const safe = val.replace(/[^A-Za-z0-9_-]+/g, "-");
-  if (!safe) throw new Error(`Question ${index + 1}: invalid id`);
+  if (!safe) {
+    if (allowGenerate) return generateQuestionId();
+    throw new Error(`Question ${index + 1}: invalid id`);
+  }
   return safe;
 }
-function normalizeQuestionInput(q, index) {
+function normalizeQuestionInput(q, index, { allowMissingId = false } = {}) {
   if (!q || typeof q !== "object") throw new Error(`Question ${index + 1}: invalid`);
-  const id = sanitizeQuestionId(q.id, index);
+  const id = sanitizeQuestionId(q.id, index, { allowGenerate: allowMissingId });
   const text = String(q.text || "").trim();
   if (!text) throw new Error(`Question ${index + 1}: missing 'text'`);
   if (!Array.isArray(q.options) || q.options.length !== 4)
@@ -115,6 +124,11 @@ function validateQuestionsPayload(payload) {
 
   try {
     const normalized = sourceQuestions.map((q, idx) => normalizeQuestionInput(q, idx));
+    const seen = new Set();
+    for (const q of normalized) {
+      if (seen.has(q.id)) throw new Error(`Duplicate id detected: ${q.id}`);
+      seen.add(q.id);
+    }
     return { course, template, questions: normalized };
   } catch (e) {
     return { error: e.message };
@@ -284,6 +298,7 @@ th,td{border-bottom:1px solid var(--bd);padding:8px;text-align:right}
 .right{margin-inline-start:auto}
 .ok{color:#065f46}.err{color:#991b1b}
 kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-radius:6px;padding:0 6px}
+code{background:#f3f4f6;border-radius:6px;padding:0 6px;font-family:ui-monospace,monospace;font-size:12px}
 </style>
 </head>
 <body>
@@ -375,6 +390,17 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
   </div>
 
   <div class="card">
+    <div class="flex"><div><b>گام ۳٫۵:</b> درون‌ریزی JSON خام</div></div>
+    <label>چسباندن JSON خام</label>
+    <textarea id="jsonImport" placeholder='[{"text":"...","options":["A","B","C","D"],"correct":0}]'></textarea>
+    <div class="muted small" style="margin-top:6px">ساختار مورد انتظار: آرایه‌ای از اشیای سؤال با فیلدهای <code>id</code> (اختیاری)، <code>text</code>، <code>options</code> (۴ مورد)، <code>correct</code> (۰ تا ۳) و <code>explanation</code> اختیاری.</div>
+    <div class="flex" style="margin-top:10px">
+      <button id="importJsonBtn" class="btn btn-outline">افزودن از JSON</button>
+      <span id="importStatus" class="small muted"></span>
+    </div>
+  </div>
+
+  <div class="card">
     <div class="flex">
       <div><b>گام ۴:</b> پیش‌نویس سؤال‌ها</div>
       <div class="right"><span class="pill" id="draftCount">۰ سؤال</span></div>
@@ -432,6 +458,9 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
   const statusEl   = document.getElementById("status");
   const listLink   = document.getElementById("listLink");
   const logEl      = document.getElementById("log");
+  const importTextarea = document.getElementById("jsonImport");
+  const importBtn = document.getElementById("importJsonBtn");
+  const importStatus = document.getElementById("importStatus");
 
   listLink.href = api("/admin/list");
 
@@ -444,8 +473,13 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
     p.className = isErr ? "err" : "ok";
     logEl.prepend(p);
   }
+  function setImportStatus(msg, isErr){
+    if(!importStatus) return;
+    importStatus.textContent = msg || "";
+    importStatus.className = msg ? (isErr ? "small err" : "small ok") : "small muted";
+  }
   function safeId(){
-    return ("Q" + Date.now().toString(36) + Math.random().toString(36).slice(2,6)).toUpperCase();
+    return ("Q" + Date.now().toString(36) + Math.random().toString(36).slice(2,8)).toUpperCase();
   }
   function refreshCoursesUI(){
     courseSelect.innerHTML = "";
@@ -570,10 +604,13 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
     const o4 = (opt4.value||"").trim();
     const c  = Number(correct.value);
     if(!text || !o1 || !o2 || !o3 || !o4){ alert("همه فیلدهای سؤال و گزینه‌ها لازم‌اند"); return; }
+    const expl = (explanation.value||"").trim();
     draft.push({
-      id: ("Q" + Date.now().toString(36) + Math.random().toString(36).slice(2,6)).toUpperCase(),
-      text, options:[o1,o2,o3,o4], correct:c,
-      ...(explanation.value ? { explanation: explanation.value } : {})
+      id: safeId(),
+      text,
+      options:[o1,o2,o3,o4],
+      correct:c,
+      ...(expl ? { explanation: expl } : {})
     });
     refreshDraft();
     qText.value = ""; opt1.value = ""; opt2.value = ""; opt3.value = ""; opt4.value = ""; correct.value = "0"; explanation.value = "";
@@ -581,6 +618,90 @@ kbd{background:#f5f5f5;border:1px solid #e5e5e5;border-bottom-width:3px;border-r
   document.getElementById("clearDraft").addEventListener("click", ()=>{
     if(confirm("کل پیش‌نویس پاک شود؟")){ draft = []; refreshDraft(); }
   });
+  if(importBtn){
+    importBtn.addEventListener("click", async ()=>{
+      const raw = (importTextarea.value||"").trim();
+      if(!raw){ setImportStatus("ابتدا JSON را بچسبانید.", true); return; }
+      let parsed;
+      try{
+        parsed = JSON.parse(raw);
+      }catch{
+        setImportStatus("JSON نامعتبر است.", true);
+        return;
+      }
+      const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.questions) ? parsed.questions : null);
+      if(!list || !list.length){
+        setImportStatus("باید آرایه‌ای از سؤال‌ها باشد.", true);
+        return;
+      }
+      const prepared = [];
+      const seenLocal = new Set();
+      try{
+        list.forEach((item, idx)=>{
+          if(!item || typeof item !== "object") throw new Error(`سؤال ${idx+1} نامعتبر است.`);
+          const text = String(item.text||"").trim();
+          if(!text) throw new Error(`سؤال ${idx+1}: متن خالی است.`);
+          const options = Array.isArray(item.options) ? item.options.map(opt => String(opt||"").trim()) : [];
+          if(options.length !== 4 || options.some(opt=>!opt)) throw new Error(`سؤال ${idx+1}: چهار گزینهٔ غیرخالی لازم است.`);
+          const correct = Number(item.correct);
+          if(!Number.isInteger(correct) || correct < 0 || correct > 3) throw new Error(`سؤال ${idx+1}: مقدار صحیح باید ۰ تا ۳ باشد.`);
+          const explanationVal = item.explanation ? String(item.explanation).trim() : "";
+          let id = String(item.id||"").trim();
+          if(id){
+            id = id.replace(/[^A-Za-z0-9_-]+/g, "-");
+            if(!id) id = safeId();
+          }else{
+            id = safeId();
+          }
+          if(seenLocal.has(id)) throw new Error(`شناسهٔ تکراری برای سؤال ${idx+1}: ${id}`);
+          seenLocal.add(id);
+          prepared.push({
+            id,
+            text,
+            options,
+            correct,
+            ...(explanationVal ? { explanation: explanationVal } : {})
+          });
+        });
+      }catch(err){
+        setImportStatus(err.message || "خطای اعتبارسنجی", true);
+        return;
+      }
+      setImportStatus("در حال بررسی با سرور...", false);
+      try{
+        const r = await fetch(api("/admin/import-json"), {
+          method:"POST",
+          headers:{"content-type":"application/json"},
+          body: JSON.stringify({ questions: prepared })
+        });
+        const j = await r.json().catch(()=>({}));
+        if(!r.ok || !j.ok){
+          const msg = j && j.error ? j.error : `خطا ${r.status}`;
+          setImportStatus(`❌ ${msg}`, true);
+          return;
+        }
+        const existing = new Set(draft.map(q=>q.id));
+        const added = [];
+        (j.questions||[]).forEach(q=>{
+          let newId = q.id;
+          while(existing.has(newId)){
+            newId = safeId();
+          }
+          existing.add(newId);
+          draft.push({ ...q, id: newId });
+          added.push(newId);
+        });
+        refreshDraft();
+        importTextarea.value = "";
+        setImportStatus(`✅ ${added.length} سؤال اضافه شد.`, false);
+        if(added.length){
+          log(`افزودن از JSON: ${added.join(", ")}`);
+        }
+      }catch(err){
+        setImportStatus("❌ خطا در ارتباط با سرور", true);
+      }
+    });
+  }
   document.getElementById("saveSet").addEventListener("click", async ()=>{
     const courseId = courseSelect.value;
     const template = templateSelect.value;
@@ -1049,6 +1170,36 @@ export default {
         return new Response(JSON.stringify({ ok: true, ...results }, null, 2), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
       } catch (e) {
         return new Response(JSON.stringify({ ok: false, error: e.message || "migration error" }), { status: 500, headers: { "content-type": "application/json; charset=utf-8" } });
+      }
+    }
+
+    if (url.pathname === "/admin/import-json" && request.method === "POST") {
+      const key = url.searchParams.get("key") || "";
+      if (!env.ADMIN_KEY || key !== env.ADMIN_KEY)
+        return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), { status: 401, headers: { "content-type": "application/json; charset=utf-8" } });
+      let raw = "";
+      try {
+        raw = await request.text();
+      } catch {}
+      let parsed;
+      try {
+        parsed = JSON.parse(raw || "null");
+      } catch {
+        return new Response(JSON.stringify({ ok: false, error: "Invalid JSON" }), { status: 400, headers: { "content-type": "application/json; charset=utf-8" } });
+      }
+      const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.questions) ? parsed.questions : null;
+      if (!list || !list.length)
+        return new Response(JSON.stringify({ ok: false, error: "Expected an array of questions" }), { status: 400, headers: { "content-type": "application/json; charset=utf-8" } });
+      try {
+        const normalized = list.map((q, idx) => normalizeQuestionInput(q, idx, { allowMissingId: true }));
+        const seen = new Set();
+        for (const q of normalized) {
+          if (seen.has(q.id)) throw new Error(`Duplicate id detected: ${q.id}`);
+          seen.add(q.id);
+        }
+        return new Response(JSON.stringify({ ok: true, questions: normalized }, null, 2), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: e.message || "validation error" }), { status: 400, headers: { "content-type": "application/json; charset=utf-8" } });
       }
     }
 
