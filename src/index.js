@@ -812,11 +812,12 @@ export default {
           });
           const out = await r.json();
           if (!out.ok) {
-            const msgText =
-              out.error === "not-ended" ? "بازی هنوز تمام نشده است." :
-              out.error === "no-room" ? "اتاق پیدا نشد." :
-              out.error === "no-questions" ? "سؤالی برای نمایش وجود ندارد." :
-              "خطا در دریافت مرور گروهی.";
+            const errorMessages = {
+              "not-ended": "بازی هنوز تمام نشده است.",
+              "no-room": "اتاق پیدا نشد.",
+              "no-questions": "سؤالی برای نمایش وجود ندارد.",
+            };
+            const msgText = errorMessages[out.error] || "خطا در دریافت مرور گروهی.";
             await tg.answerCallback(env, cq.id, msgText, true);
             if (chat_id) await tg.sendMessage(env, chat_id, `⚠️ ${msgText}`);
             return new Response("ok", { status: 200 });

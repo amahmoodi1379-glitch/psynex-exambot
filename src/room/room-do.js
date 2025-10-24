@@ -344,7 +344,7 @@ export class RoomDO {
     if (!Array.isArray(data.questions) || !data.questions.length) return { ok:false, error:"no-questions" };
 
     const lines = [`🧾 مرور گروهی — اتاق ${data.room_id}`, ""];
-    (data.questions || []).forEach((q, i) => {
+    data.questions.forEach((q, i) => {
       const correct = Number.isInteger(q?.correct) ? Number(q.correct) + 1 : 1;
       lines.push(`سؤال ${i+1}: گزینه ${correct}`);
     });
