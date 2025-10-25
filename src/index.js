@@ -9,6 +9,12 @@ import {
 } from "./constants.js";
 export { RoomDO } from "./room/room-do.js"; // Durable Object کلاس
 
+const TEMPLATE_TITLES = {
+  [TEMPLATE_KEYS.KONKOORI]: "قالب کنکوری",
+  [TEMPLATE_KEYS.TAALIFI]: "قالب تألیفی",
+  [TEMPLATE_KEYS.MIX]: "قالب ترکیبی",
+};
+
 // ==============================
 //   Helpers: کانال اجباری
 // ==============================
@@ -750,14 +756,20 @@ export default {
         }
 
         if (cmd === "/newgame") {
+          const note = "دستور جدید ربات <code>/startgame</code> است.";
+          await tg.sendMessage(env, chat_id, note, { reply_to_message_id: msg.message_id, parse_mode: "HTML" });
+          return new Response("ok", { status: 200 });
+        }
+
+        if (cmd === "/startgame") {
           if (!["group", "supergroup"].includes(chat_type)) {
-            await tg.sendMessage(env, chat_id, "این دستور فقط در گروه کار می‌کند.", { reply_to_message_id: msg.message_id });
+            await tg.sendMessage(env, chat_id, "این دستور فقط داخل گروه‌ها فعال است.", { reply_to_message_id: msg.message_id });
             return new Response("ok", { status: 200 });
           }
           const chk = await mustBeMember(env, from.id);
           if (!chk.ok) {
             if (chk.admin_issue) await tg.sendMessage(env, chat_id, `❌ ربات باید ادمین کانال باشد.\n${channelLink(env)}`);
-            else await tg.sendMessage(env, chat_id, `❌ برای ساخت بازی عضو کانال شوید:\n${channelLink(env)}`);
+            else await tg.sendMessage(env, chat_id, `❌ برای ساخت بازی ابتدا عضو کانال شوید:\n${channelLink(env)}`);
             return new Response("ok", { status: 200 });
           }
 
@@ -765,7 +777,7 @@ export default {
           const key = `${chat_id}-${roomId}`;
           const stub = getStubByKey(key);
 
-          await stub.fetch("https://do/create", {
+          const res = await stub.fetch("https://do/create", {
             method: "POST",
             body: JSON.stringify({
               chat_id,
@@ -774,80 +786,24 @@ export default {
               room_id: roomId,
             }),
           });
-
-          const kb = {
-            inline_keyboard: [
-              [{ text: "📚 انتخاب درس", callback_data: `cl:${roomId}` }],
-              [
-                { text: "کنکوری", callback_data: `t:${roomId}:${TEMPLATE_KEYS.KONKOORI}` },
-                { text: "تألیفی (فعلاً غیرفعال)", callback_data: `tdisabled:${roomId}:${TEMPLATE_KEYS.TAALIFI}` },
-                { text: "ترکیبی (فعلاً غیرفعال)", callback_data: `tdisabled:${roomId}:${TEMPLATE_KEYS.MIX}` },
-              ],
-              [
-                { text: "۵ سواله", callback_data: `m:${roomId}:5` },
-                { text: "۱۰ سواله", callback_data: `m:${roomId}:10` },
-              ],
-              [
-                { text: "✅ آماده‌ام", callback_data: `j:${roomId}` },
-                { text: "🟢 آغاز بازی", callback_data: `s:${roomId}` },
-              ],
-            ],
-          };
-          const joinLine = env.REQUIRED_CHANNEL ? `\n\n🔒 عضو کانال باشید: ${channelLink(env)}` : "";
-          await tg.sendMessage(
-            env,
-            chat_id,
-            "🎮 بازی جدید ساخته شد.\n۱) «📚 انتخاب درس» را بزنید.\n۲) قالب را انتخاب کنید (فعلاً فقط کنکوری فعال است).\n۳) حالت ۵ یا ۱۰ سؤال.\n۴) شرکت‌کننده‌ها «✅ آماده‌ام»، شروع‌کننده «🟢 آغاز بازی»." + joinLine,
-            { reply_markup: kb }
-          );
+          const out = await res.json().catch(() => ({ ok: false }));
+          if (!out.ok) {
+            const errMsg =
+              out.error === "send-failed"
+                ? "❌ ارسال پیام آغاز بازی ممکن نشد. دسترسی ربات را بررسی کنید."
+                : "❌ ساخت بازی با خطا مواجه شد. دوباره تلاش کنید.";
+            await tg.sendMessage(env, chat_id, errMsg);
+          }
           return new Response("ok", { status: 200 });
         }
 
-        // /start برای PV (مرور پاسخ‌ها)
+        // /start در PV — مرور خصوصی حذف شده است
         if (cmd === "/start" && chat_type === "private") {
-          const parts = (msg.text || "").trim().split(/\s+/);
-          const payload = parts.length > 1 ? parts.slice(1).join(" ") : "";
-
-          if (!payload) {
-            await tg.sendMessage(env, chat_id, "سلام! وقتی بازی تمام شد، از لینک «🔍 مرور پاسخ‌ها» داخل گروه وارد شوید.");
-            return new Response("ok", { status: 200 });
-          }
-
-          if (payload.startsWith("rv:")) {
-            const [, encChat, rid] = payload.split(":");
-            if (!encChat || !rid) {
-              await tg.sendMessage(env, chat_id, "payload نامعتبر است.");
-              return new Response("ok", { status: 200 });
-            }
-            // decode base64url
-            function ub64url(s){ s=s.replace(/-/g,"+").replace(/_/g,"/"); while(s.length%4)s+="="; try{ return atob(s);}catch{return "";} }
-            const chatPlain = ub64url(encChat);
-            const groupChatId = chatPlain ? Number(chatPlain) : NaN;
-            if (!Number.isFinite(groupChatId)) {
-              await tg.sendMessage(env, chat_id, "payload نامعتبر است.");
-              return new Response("ok", { status: 200 });
-            }
-
-            const key = `${groupChatId}-${rid}`;
-            const stub = env.ROOMS.get(env.ROOMS.idFromName(key));
-            const r = await stub.fetch("https://do/review", {
-              method: "POST",
-              body: JSON.stringify({ user_id: from.id }),
-            });
-            const out = await r.json();
-            if (!out.ok) {
-              const m =
-                out.error === "not-ended" ? "بازی هنوز تمام نشده است." :
-                out.error === "not-participant" ? "شما در این بازی شرکت نکرده‌اید." :
-                "خطا در دریافت مرور.";
-              await tg.sendMessage(env, chat_id, m);
-              return new Response("ok", { status: 200 });
-            }
-            await tg.sendMessage(env, chat_id, out.text);
-            return new Response("ok", { status: 200 });
-          }
-
-          await tg.sendMessage(env, chat_id, "سلام! برای مرور پاسخ‌ها از لینک داخل گروه استفاده کن.");
+          await tg.sendMessage(
+            env,
+            chat_id,
+            "سلام! مرور خصوصی غیرفعال شده است. برای مرور نتایج از دکمهٔ «🧾 مرور گروهی» در پیام نتایج گروه استفاده کن."
+          );
           return new Response("ok", { status: 200 });
         }
       }
@@ -905,7 +861,7 @@ export default {
           let row = [];
           for (const c of courses) {
             row.push({ text: c.title, callback_data: `c:${rid}:${c.id}` });
-            if (row.length === 3) { rows.push(row); row = []; }
+            if (row.length === 2) { rows.push(row); row = []; }
           }
           if (row.length) rows.push(row);
           await tg.answerCallback(env, cq.id, "لیست درس‌ها");
@@ -930,8 +886,8 @@ export default {
               out.error === "already-started" ? "بازی آغاز شده." : "خطا", true);
             return new Response("ok", { status: 200 });
           }
-          await tg.answerCallback(env, cq.id, "درس تنظیم شد.");
-          await tg.sendMessage(env, chat_id, `📚 درس انتخابی: <b>${out.courseId}</b>`);
+          const courseLabel = out.courseTitle || out.courseId;
+          await tg.answerCallback(env, cq.id, `درس «${courseLabel}» تنظیم شد ✅`);
           return new Response("ok", { status: 200 });
         }
 
@@ -963,8 +919,8 @@ export default {
               "خطا", true);
             return new Response("ok", { status: 200 });
           }
-          await tg.answerCallback(env, cq.id, "قالب تنظیم شد.");
-          await tg.sendMessage(env, chat_id, `🧩 قالب: <b>${out.template}</b>`);
+          const templateLabel = TEMPLATE_TITLES[out.template] || out.template;
+          await tg.answerCallback(env, cq.id, `قالب «${templateLabel}» تنظیم شد ✅`);
           return new Response("ok", { status: 200 });
         }
 
@@ -986,8 +942,8 @@ export default {
               out.error === "already-started" ? "بازی شروع شده." : "خطا", true);
             return new Response("ok", { status: 200 });
           }
-          await tg.answerCallback(env, cq.id, `روی ${out.modeCount} سوال تنظیم شد.`);
-          await tg.sendMessage(env, chat_id, `⚙️ حالت بازی: ${out.modeCount} سوال.`);
+          const modeLabel = out.modeCount === 5 ? "۵ سوالی" : out.modeCount === 10 ? "۱۰ سوالی" : `${out.modeCount} سوالی`;
+          await tg.answerCallback(env, cq.id, `حالت ${modeLabel} تنظیم شد ✅`);
           return new Response("ok", { status: 200 });
         }
 
@@ -1001,8 +957,16 @@ export default {
             body: JSON.stringify({ user_id: from.id, name: from.first_name }),
           });
           const out = await r.json();
-          await tg.answerCallback(env, cq.id, "ثبت شد: آماده‌ای ✅");
-          await tg.sendMessage(env, chat_id, `👤 ${from.first_name} آماده شد. (کل آماده‌ها: ${out.readyCount})`);
+          if (!out.ok) {
+            const msg =
+              out.error === "already-started" ? "بازی شروع شده است." :
+              out.error === "no-room" ? "اتاق پیدا نشد." :
+              "خطا در ثبت آمادگی.";
+            await tg.answerCallback(env, cq.id, msg, true);
+            return new Response("ok", { status: 200 });
+          }
+          const statusText = out.alreadyReady ? "قبلاً آماده بودی ✨" : "آماده شدی ✅";
+          await tg.answerCallback(env, cq.id, `${statusText} • آماده‌ها: ${out.readyCount}`);
           return new Response("ok", { status: 200 });
         }
 
@@ -1027,7 +991,7 @@ export default {
               out.error === "no-questions" ? "بانک سؤال کافی نیست." : "خطا", true);
             return new Response("ok", { status: 200 });
           }
-          await tg.answerCallback(env, cq.id, "بازی شروع شد! ⏱");
+          await tg.answerCallback(env, cq.id, "🚀 بازی آغاز شد!");
           return new Response("ok", { status: 200 });
         }
 
