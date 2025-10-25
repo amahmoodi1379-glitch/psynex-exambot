@@ -12,7 +12,7 @@ export function getCommand(msg) {
   const cmdEnt = entities.find((e) => e.type === "bot_command" && e.offset === 0);
   if (!cmdEnt) return null;
   const raw = text.substring(cmdEnt.offset, cmdEnt.offset + cmdEnt.length).toLowerCase();
-  return raw.split("@")[0]; // "/newgame" | "/start"
+  return raw.split("@")[0]; // "/startgame" | "/start"
 }
 
 // Deep-link encoder/decoder برای chat_id گروه
