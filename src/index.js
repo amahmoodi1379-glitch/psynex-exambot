@@ -900,12 +900,17 @@ export default {
         const openBotLink = botUsername ? `https://t.me/${botUsername}?start=startgame` : "";
         const inviteLines = [
           "سلام! 👋",
-          "برای ساخت آزمون تازه با ربات ساینکس این مراحل را انجام بده:",
-          "• دستور <code>/startgame</code> را در گروه یا گفت‌وگوی خصوصی با ربات بفرست تا اتاق ساخته شود.",
-          "• پیام معرفی را برای دوستانت بفرست و بعد از آماده شدن، روی «🚀 آغاز بازی» بزنید.",
+          "من ربات ساینکس هستم و آزمون‌های چندگزینه‌ای تعاملی را برای گروهت مدیریت می‌کنم.",
+          "",
+          "چطور شروع کنم؟",
+          "• دستور <code>/startgame</code> را در گروه یا گفت‌وگوی خصوصی با من بفرست تا یک اتاق تازه ساخته شود.",
+          "• پیام راه‌اندازی را برای دوستانت بفرست و پس از آماده‌شدن همه روی «🚀 آغاز بازی» بزن.",
         ];
         if (addToGroupLink) {
-          inviteLines.push("", `➕ افزودن سریع ربات به گروه: ${addToGroupLink}`);
+          inviteLines.push("", `➕ افزودن ربات ساینکس به گروه: ${addToGroupLink}`);
+        }
+        if (openBotLink) {
+          inviteLines.push("", `🤖 گفت‌وگو با ربات ساینکس: ${openBotLink}`);
         }
         const inviteText = inviteLines.join("\n");
 
@@ -913,7 +918,7 @@ export default {
         if (addToGroupLink) {
           articleKeyboard.push([
             {
-              text: "➕ افزودن به گروه",
+              text: "➕ افزودن ربات ساینکس به گروه",
               url: addToGroupLink,
             },
           ]);
@@ -921,7 +926,7 @@ export default {
         if (openBotLink) {
           articleKeyboard.push([
             {
-              text: "🤖 شروع گفتگو با ربات",
+              text: "🤖 گفت‌وگو با ربات ساینکس",
               url: openBotLink,
             },
           ]);
@@ -931,34 +936,13 @@ export default {
           {
             type: "article",
             id: "startgame-invite",
-            title: "دعوت به آزمون ربات ساینکس",
-            description: "راهنمای ساخت بازی جدید با دستور /startgame",
+            title: "دعوت به بازی با ربات ساینکس",
+            description: "آموزش ساخت اتاق تازه با دستور /startgame",
             input_message_content: {
               message_text: inviteText,
               parse_mode: "HTML",
             },
             reply_markup: articleKeyboard.length ? { inline_keyboard: articleKeyboard } : undefined,
-          },
-          {
-            type: "article",
-            id: "startgame-command",
-            title: "ارسال دستور /startgame به گروه",
-            description: "پیامی آماده برای فرستادن دستور /startgame",
-            input_message_content: {
-              message_text: "/startgame",
-            },
-            reply_markup: addToGroupLink
-              ? {
-                  inline_keyboard: [
-                    [
-                      {
-                        text: "➕ افزودن به گروه",
-                        url: addToGroupLink,
-                      },
-                    ],
-                  ],
-                }
-              : undefined,
           },
         ];
 
