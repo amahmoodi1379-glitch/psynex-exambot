@@ -1,5 +1,5 @@
 import { tg } from "./bot/tg.js";
-import { getCommand, shortId } from "./utils.js";
+import { getCommand, shortId, decChatId } from "./utils.js";
 import {
   ACTIVE_TEMPLATES,
   ALLOWED_TEMPLATES,
@@ -762,8 +762,12 @@ export default {
         }
 
         if (cmd === "/startgame") {
-          if (!["group", "supergroup"].includes(chat_type)) {
-            await tg.sendMessage(env, chat_id, "این دستور فقط داخل گروه‌ها فعال است.", { reply_to_message_id: msg.message_id });
+          const isGroupChat = ["group", "supergroup"].includes(chat_type);
+          const isPrivateChat = chat_type === "private";
+          if (!isGroupChat && !isPrivateChat) {
+            await tg.sendMessage(env, chat_id, "این دستور فقط در گروه‌ها یا گفتگوهای خصوصی با ربات در دسترس است.", {
+              reply_to_message_id: msg.message_id,
+            });
             return new Response("ok", { status: 200 });
           }
           const chk = await mustBeMember(env, from.id);
@@ -781,6 +785,7 @@ export default {
             method: "POST",
             body: JSON.stringify({
               chat_id,
+              chat_type,
               starter_id: from.id,
               starter_name: from.first_name,
               room_id: roomId,
@@ -814,10 +819,19 @@ export default {
         const msg = cq.message || {};
         const chat_id = msg.chat?.id;
         const from = cq.from;
-        const parts = (cq.data || "").split(":"); // cl:<rid> | c:<rid>:<courseId> | t:<rid>:<tpl> | m:<rid>:5 | j:<rid> | s:<rid> | a:<rid>:<qIndex>:<opt>
+        const parts = (cq.data || "").split(":"); // cl:<rid>[:host*] | c:<rid>:<courseId>[:host*] | ...
+        const hostMarker = parts.length ? parts[parts.length - 1] : null;
+        let hostChatId = chat_id;
+        if (hostMarker && hostMarker.startsWith("host")) {
+          const decoded = decChatId(hostMarker.slice(4));
+          if (decoded !== null && decoded !== undefined && !Number.isNaN(decoded)) {
+            hostChatId = decoded;
+            parts.pop();
+          }
+        }
         const act = parts[0];
         const rid = parts[1];
-        const key = `${chat_id}-${rid}`;
+        const key = `${hostChatId}-${rid}`;
         const stub = env.ROOMS.get(env.ROOMS.idFromName(key));
 
         async function ensureMemberOrNotify() {

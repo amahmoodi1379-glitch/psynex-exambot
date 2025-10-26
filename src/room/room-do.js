@@ -1,6 +1,7 @@
 // RoomDO: منطق بازی داخل Durable Object
 
 import { ACTIVE_TEMPLATES, KNOWN_TEMPLATES, TEMPLATE_KEYS } from "../constants.js";
+import { encChatId } from "../utils.js";
 
 const COURSES_KEY = "admin/courses.json";
 
@@ -148,6 +149,17 @@ export class RoomDO {
     return MODE_LABELS[count] || `${count} سوالی`;
   }
 
+  hostSuffix(data) {
+    if (!data || data.chat_type !== "private") return "";
+    const encoded = encChatId(data.chat_id);
+    return encoded ? `:host${encoded}` : "";
+  }
+
+  withHost(data, base) {
+    const suffix = this.hostSuffix(data);
+    return suffix ? `${base}${suffix}` : base;
+  }
+
   templateButton(data, templateKey) {
     const rid = data?.room_id;
     const label = this.templateLabel(templateKey) || templateKey;
@@ -158,13 +170,13 @@ export class RoomDO {
     if (!ACTIVE_TEMPLATES.has(templateKey)) {
       return {
         text: `${emoji} ${label} 🚫`,
-        callback_data: `tdisabled:${rid}:${templateKey}`,
+        callback_data: this.withHost(data, `tdisabled:${rid}:${templateKey}`),
       };
     }
     const selected = data?.template === templateKey ? " ✅" : "";
     return {
       text: `${emoji} ${label}${selected}`,
-      callback_data: `t:${rid}:${templateKey}`,
+      callback_data: this.withHost(data, `t:${rid}:${templateKey}`),
     };
   }
 
@@ -236,7 +248,7 @@ export class RoomDO {
     rows.push([
       {
         text: courseSelected ? "📚 انتخاب درس ✅" : "📚 انتخاب درس",
-        callback_data: `cl:${rid}`,
+        callback_data: this.withHost(data, `cl:${rid}`),
       },
     ]);
 
@@ -250,14 +262,14 @@ export class RoomDO {
       const prefix = count === 5 ? "5️⃣" : "🔟";
       return {
         text: `${prefix} ${label}${selected}`,
-        callback_data: `m:${rid}:${count}`,
+        callback_data: this.withHost(data, `m:${rid}:${count}`),
       };
     });
     rows.push(modeRow);
 
     rows.push([
-      { text: "✨ آماده‌ام", callback_data: `j:${rid}` },
-      { text: "🚀 آغاز بازی", callback_data: `s:${rid}` },
+      { text: "✨ آماده‌ام", callback_data: this.withHost(data, `j:${rid}`) },
+      { text: "🚀 آغاز بازی", callback_data: this.withHost(data, `s:${rid}`) },
     ]);
 
     return { inline_keyboard: rows };
@@ -265,7 +277,8 @@ export class RoomDO {
 
   buildSetupText(data) {
     const lines = [];
-    lines.push("🎮 <b>اتاق بازی گروهی</b>");
+    const isPrivate = data?.chat_type === "private";
+    lines.push(isPrivate ? "🎮 <b>اتاق بازی دونفره</b>" : "🎮 <b>اتاق بازی گروهی</b>");
     const statusLine = data.resultsPosted
       ? "🏁 وضعیت: <b>بازی به پایان رسید</b>"
       : data.started
@@ -308,6 +321,9 @@ export class RoomDO {
       lines.push("۲️⃣ یکی از قالب‌ها را برگزینید.");
       lines.push("۳️⃣ حالت ۵ یا ۱۰ سوالی را تعیین کنید.");
       lines.push("۴️⃣ شرکت‌کننده‌ها «✨ آماده‌ام» و آغازگر «🚀 آغاز بازی» را فشار دهد.");
+      if (isPrivate) {
+        lines.push("۵️⃣ برای دعوت دوست، این پیام را برای او فوروارد کنید تا دکمه‌ها را بزند.");
+      }
     } else if (data.started && !data.resultsPosted) {
       lines.push("");
       lines.push("🔥 بازی آغاز شده است؛ موفق باشید!");
@@ -368,11 +384,12 @@ export class RoomDO {
   }
 
   // ====== Game flow ======
-  async create({ chat_id, starter_id, starter_name, room_id }) {
+  async create({ chat_id, chat_type, starter_id, starter_name, room_id }) {
     const starterId = String(starter_id);
     const starterName = (String(starter_name ?? "").trim() || "بدون نام");
     const data = {
       chat_id,
+      chat_type: chat_type || "group",
       room_id,
       starter_id: starterId,
       starter_name: starterName,
@@ -565,11 +582,12 @@ export class RoomDO {
         `۴) ${q.options[3]}`
       ].join("\n");
 
+      const hostSuffix = this.hostSuffix(data);
       const kb = { inline_keyboard: [[
-        { text:"۱", callback_data:`a:${data.room_id}:${data.currentIndex}:0` },
-        { text:"۲", callback_data:`a:${data.room_id}:${data.currentIndex}:1` },
-        { text:"۳", callback_data:`a:${data.room_id}:${data.currentIndex}:2` },
-        { text:"۴", callback_data:`a:${data.room_id}:${data.currentIndex}:3` },
+        { text:"۱", callback_data:`a:${data.room_id}:${data.currentIndex}:0${hostSuffix}` },
+        { text:"۲", callback_data:`a:${data.room_id}:${data.currentIndex}:1${hostSuffix}` },
+        { text:"۳", callback_data:`a:${data.room_id}:${data.currentIndex}:2${hostSuffix}` },
+        { text:"۴", callback_data:`a:${data.room_id}:${data.currentIndex}:3${hostSuffix}` },
       ]]};
 
       const sent = await this.sendMessage(data.chat_id, text, { reply_markup: kb });
@@ -634,7 +652,7 @@ export class RoomDO {
     lines.push("", "🔁 برای مرور گروهی از دکمهٔ زیر استفاده کنید.");
 
     const replyMarkup = {
-      inline_keyboard: [[{ text: "🧾 مرور گروهی", callback_data: `gr:${data.room_id}` }]],
+      inline_keyboard: [[{ text: "🧾 مرور گروهی", callback_data: this.withHost(data, `gr:${data.room_id}`) }]],
     };
 
     await this.sendMessage(data.chat_id, lines.join("\n"), { reply_markup: replyMarkup });
