@@ -837,7 +837,14 @@ export default {
             return handleStartGameRequest({ env, msg, getStubByKey });
           }
           const botUsername = (env.BOT_USERNAME || "").replace(/^@/, "");
-          const inviteKeyboard = [];
+          const inviteKeyboard = [
+            [
+              {
+                text: "🎮 شروع بازی",
+                callback_data: "startpv",
+              },
+            ],
+          ];
           if (botUsername) {
             inviteKeyboard.push([
               {
@@ -848,22 +855,12 @@ export default {
           }
           inviteKeyboard.push([
             {
-              text: "📨 دعوت برای دوست",
+              text: "🤝 بازی با دوست",
               switch_inline_query_chosen_chat: {
                 query: "startgame",
                 allow_user_chats: true,
                 allow_bot_chats: false,
                 allow_group_chats: false,
-                allow_channel_chats: false,
-              },
-            },
-            {
-              text: "🗣️ دعوت در همین چت",
-              switch_inline_query_chosen_chat: {
-                query: "startgame",
-                allow_user_chats: false,
-                allow_bot_chats: false,
-                allow_group_chats: true,
                 allow_channel_chats: false,
               },
             },
@@ -986,6 +983,24 @@ export default {
           }
         }
         const act = parts[0];
+
+        if (act === "startpv") {
+          const fakeMessage = {
+            chat: msg.chat,
+            message_id: msg.message_id,
+            from: cq.from,
+          };
+          try {
+            const result = await handleStartGameRequest({ env, msg: fakeMessage, getStubByKey });
+            await tg.answerCallback(env, cq.id, "🎮 درخواست شروع بازی ثبت شد.");
+            return result;
+          } catch (err) {
+            await tg.answerCallback(env, cq.id, "❌ شروع بازی ممکن نشد. دوباره تلاش کنید.", true);
+            console.error("startpv error", err);
+            return new Response("ok", { status: 200 });
+          }
+        }
+
         const rid = parts[1];
         const key = `${hostChatId}-${rid}`;
         const stub = env.ROOMS.get(env.ROOMS.idFromName(key));
