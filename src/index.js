@@ -851,15 +851,10 @@ export default {
               text: "📨 دعوت برای دوست",
               switch_inline_query: "startgame",
             },
-            botUsername
-              ? {
-                  text: "🚀 بازی دونفره در پی‌وی",
-                  url: `https://t.me/${botUsername}?start=startgame`,
-                }
-              : {
-                  text: "🗣️ دعوت در همین چت",
-                  switch_inline_query_current_chat: "startgame",
-                },
+            {
+              text: "🗣️ دعوت در همین چت",
+              switch_inline_query_current_chat: "startgame",
+            },
           ]);
           const welcomeText = `سلام 👋
 من ربات آزمون ساینکس هستم. می‌تونی آزمون‌های چندگزینه‌ای بسازی، دوستانت رو دعوت کنی و نتایج رو یکجا ببینی.
