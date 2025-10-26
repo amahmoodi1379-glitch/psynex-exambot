@@ -31,6 +31,13 @@ export const tg = {
       show_alert,
     });
   },
+  answerInlineQuery(env, inline_query_id, results, extra = {}) {
+    return this.call(env, "answerInlineQuery", {
+      inline_query_id,
+      results,
+      ...extra,
+    });
+  },
   // --- عضویت کانال / اطلاعات کانال ---
   getChat(env, chat_id) {
     return this.call(env, "getChat", { chat_id });
