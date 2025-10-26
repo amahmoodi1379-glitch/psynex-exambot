@@ -58,29 +58,35 @@ function extractCommandPayload(msg) {
   return text.substring(cmdEnt.offset + cmdEnt.length).trim();
 }
 
-async function handleStartGameRequest({ env, msg, chat_id, chat_type, from, getStubByKey }) {
-  const isGroupChat = ["group", "supergroup"].includes(chat_type);
-  const isPrivateChat = chat_type === "private";
-  if (!isGroupChat && !isPrivateChat) {
-    await tg.sendMessage(
-      env,
-      chat_id,
-      "این دستور فقط در گروه‌ها یا گفتگوهای خصوصی با ربات در دسترس است.",
-      { reply_to_message_id: msg.message_id }
-    );
+async function handleStartGameRequest({ env, msg, getStubByKey }) {
+  const chat = msg?.chat || {};
+  const chat_id = chat.id;
+  const chat_type = chat.type || "private";
+  const from = msg?.from || {};
+
+  if (!chat_id || !["group", "supergroup", "private"].includes(chat_type)) {
+    if (chat_id) {
+      await tg.sendMessage(
+        env,
+        chat_id,
+        "این دستور فقط در گروه‌ها یا گفتگوهای خصوصی با ربات در دسترس است.",
+        { reply_to_message_id: msg.message_id }
+      );
+    }
     return new Response("ok", { status: 200 });
   }
 
   const chk = await mustBeMember(env, from.id);
   if (!chk.ok) {
-    if (chk.admin_issue)
+    if (chk.admin_issue) {
       await tg.sendMessage(env, chat_id, `❌ ربات باید ادمین کانال باشد.\n${channelLink(env)}`);
-    else
+    } else {
       await tg.sendMessage(
         env,
         chat_id,
         `❌ برای ساخت بازی ابتدا عضو کانال شوید:\n${channelLink(env)}`
       );
+    }
     return new Response("ok", { status: 200 });
   }
 
@@ -821,14 +827,14 @@ export default {
         }
 
         if (cmd === "/startgame") {
-          return handleStartGameRequest({ env, msg, chat_id, chat_type, from, getStubByKey });
+          return handleStartGameRequest({ env, msg, getStubByKey });
         }
 
         // /start در PV — پیام خوشامد و دعوت
         if (cmd === "/start" && chat_type === "private") {
           const startPayload = extractCommandPayload(msg);
           if (startPayload === "startgame") {
-            return handleStartGameRequest({ env, msg, chat_id, chat_type, from, getStubByKey });
+            return handleStartGameRequest({ env, msg, getStubByKey });
           }
           const botUsername = (env.BOT_USERNAME || "").replace(/^@/, "");
           const inviteKeyboard = [];
