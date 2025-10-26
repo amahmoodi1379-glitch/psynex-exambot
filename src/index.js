@@ -50,6 +50,65 @@ async function mustBeMember(env, user_id) {
   return { ok: false, api_error: true, description: desc };
 }
 
+function extractCommandPayload(msg) {
+  const text = msg?.text || "";
+  const entities = msg?.entities || [];
+  const cmdEnt = entities.find((e) => e.type === "bot_command" && e.offset === 0);
+  if (!cmdEnt) return "";
+  return text.substring(cmdEnt.offset + cmdEnt.length).trim();
+}
+
+async function handleStartGameRequest({ env, msg, chat_id, chat_type, from, getStubByKey }) {
+  const isGroupChat = ["group", "supergroup"].includes(chat_type);
+  const isPrivateChat = chat_type === "private";
+  if (!isGroupChat && !isPrivateChat) {
+    await tg.sendMessage(
+      env,
+      chat_id,
+      "این دستور فقط در گروه‌ها یا گفتگوهای خصوصی با ربات در دسترس است.",
+      { reply_to_message_id: msg.message_id }
+    );
+    return new Response("ok", { status: 200 });
+  }
+
+  const chk = await mustBeMember(env, from.id);
+  if (!chk.ok) {
+    if (chk.admin_issue)
+      await tg.sendMessage(env, chat_id, `❌ ربات باید ادمین کانال باشد.\n${channelLink(env)}`);
+    else
+      await tg.sendMessage(
+        env,
+        chat_id,
+        `❌ برای ساخت بازی ابتدا عضو کانال شوید:\n${channelLink(env)}`
+      );
+    return new Response("ok", { status: 200 });
+  }
+
+  const roomId = shortId();
+  const key = `${chat_id}-${roomId}`;
+  const stub = getStubByKey(key);
+
+  const res = await stub.fetch("https://do/create", {
+    method: "POST",
+    body: JSON.stringify({
+      chat_id,
+      chat_type,
+      starter_id: from.id,
+      starter_name: from.first_name,
+      room_id: roomId,
+    }),
+  });
+  const out = await res.json().catch(() => ({ ok: false }));
+  if (!out.ok) {
+    const errMsg =
+      out.error === "send-failed"
+        ? "❌ ارسال پیام آغاز بازی ممکن نشد. دسترسی ربات را بررسی کنید."
+        : "❌ ساخت بازی با خطا مواجه شد. دوباره تلاش کنید.";
+    await tg.sendMessage(env, chat_id, errMsg);
+  }
+  return new Response("ok", { status: 200 });
+}
+
 // ==============================
 //   R2: دوره‌ها و سؤال‌ها (ادمین)
 // ==============================
@@ -762,48 +821,15 @@ export default {
         }
 
         if (cmd === "/startgame") {
-          const isGroupChat = ["group", "supergroup"].includes(chat_type);
-          const isPrivateChat = chat_type === "private";
-          if (!isGroupChat && !isPrivateChat) {
-            await tg.sendMessage(env, chat_id, "این دستور فقط در گروه‌ها یا گفتگوهای خصوصی با ربات در دسترس است.", {
-              reply_to_message_id: msg.message_id,
-            });
-            return new Response("ok", { status: 200 });
-          }
-          const chk = await mustBeMember(env, from.id);
-          if (!chk.ok) {
-            if (chk.admin_issue) await tg.sendMessage(env, chat_id, `❌ ربات باید ادمین کانال باشد.\n${channelLink(env)}`);
-            else await tg.sendMessage(env, chat_id, `❌ برای ساخت بازی ابتدا عضو کانال شوید:\n${channelLink(env)}`);
-            return new Response("ok", { status: 200 });
-          }
-
-          const roomId = shortId();
-          const key = `${chat_id}-${roomId}`;
-          const stub = getStubByKey(key);
-
-          const res = await stub.fetch("https://do/create", {
-            method: "POST",
-            body: JSON.stringify({
-              chat_id,
-              chat_type,
-              starter_id: from.id,
-              starter_name: from.first_name,
-              room_id: roomId,
-            }),
-          });
-          const out = await res.json().catch(() => ({ ok: false }));
-          if (!out.ok) {
-            const errMsg =
-              out.error === "send-failed"
-                ? "❌ ارسال پیام آغاز بازی ممکن نشد. دسترسی ربات را بررسی کنید."
-                : "❌ ساخت بازی با خطا مواجه شد. دوباره تلاش کنید.";
-            await tg.sendMessage(env, chat_id, errMsg);
-          }
-          return new Response("ok", { status: 200 });
+          return handleStartGameRequest({ env, msg, chat_id, chat_type, from, getStubByKey });
         }
 
         // /start در PV — پیام خوشامد و دعوت
         if (cmd === "/start" && chat_type === "private") {
+          const startPayload = extractCommandPayload(msg);
+          if (startPayload === "startgame") {
+            return handleStartGameRequest({ env, msg, chat_id, chat_type, from, getStubByKey });
+          }
           const botUsername = (env.BOT_USERNAME || "").replace(/^@/, "");
           const inviteKeyboard = [];
           if (botUsername) {
@@ -856,7 +882,7 @@ export default {
 
         const botUsername = (env.BOT_USERNAME || "").replace(/^@/, "");
         const addToGroupLink = botUsername ? `https://t.me/${botUsername}?startgroup=start` : "";
-        const openBotLink = botUsername ? `https://t.me/${botUsername}` : "";
+        const openBotLink = botUsername ? `https://t.me/${botUsername}?start=startgame` : "";
         const inviteLines = [
           "سلام! 👋",
           "برای ساخت آزمون تازه با ربات اکزام‌بات این مراحل را انجام بده:",
