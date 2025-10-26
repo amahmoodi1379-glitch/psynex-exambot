@@ -802,15 +802,106 @@ export default {
           return new Response("ok", { status: 200 });
         }
 
-        // /start در PV — مرور خصوصی حذف شده است
+        // /start در PV — پیام خوشامد و دعوت
         if (cmd === "/start" && chat_type === "private") {
-          await tg.sendMessage(
-            env,
-            chat_id,
-            "سلام! مرور خصوصی غیرفعال شده است. برای مرور نتایج از دکمهٔ «🧾 مرور گروهی» در پیام نتایج گروه استفاده کن."
-          );
+          const botUsername = (env.BOT_USERNAME || "").replace(/^@/, "");
+          const inviteKeyboard = [];
+          if (botUsername) {
+            inviteKeyboard.push([
+              {
+                text: "➕ افزودن به گروه",
+                url: `https://t.me/${botUsername}?startgroup=start`,
+              },
+            ]);
+          }
+          inviteKeyboard.push([
+            {
+              text: "📨 دعوت برای دوست",
+              switch_inline_query: "startgame",
+            },
+            {
+              text: "🗣️ دعوت در همین چت",
+              switch_inline_query_current_chat: "startgame",
+            },
+          ]);
+          const welcomeText = `سلام 👋
+من ربات آزمون اکزام‌بات هستم. می‌تونی آزمون‌های چندگزینه‌ای بسازی، دوستانت رو دعوت کنی و نتایج رو یکجا ببینی.
+
+چطور شروع کنم؟
+• دستور <code>/startgame</code> را در گفت‌وگوی خصوصی یا گروه بفرست تا یک اتاق تازه بسازیم.
+• پیام تنظیمات را برای دوستانت فوروارد کن یا از دکمه‌های دعوت همین پایین استفاده کن.
+• بعد از آماده شدن همه، روی «🚀 آغاز بازی» بزن تا سؤال‌ها ارسال شوند.
+
+برای مرور پاسخ‌ها پس از پایان بازی از دکمهٔ «🧾 مرور گروهی» در پیام نتایج گروه کمک بگیر.`;
+          await tg.sendMessage(env, chat_id, welcomeText, {
+            reply_markup: { inline_keyboard: inviteKeyboard },
+          });
           return new Response("ok", { status: 200 });
         }
+      }
+
+      if (update.inline_query) {
+        const iq = update.inline_query;
+        const rawQuery = (iq.query || "").trim();
+        const normalizedQuery = rawQuery
+          .replace(/^@[^\s]+\s+/i, "")
+          .replace(/^\//, "")
+          .toLowerCase();
+        const shouldAnswer = !normalizedQuery || normalizedQuery.startsWith("startgame");
+
+        if (!shouldAnswer) {
+          await tg.answerInlineQuery(env, iq.id, [], { cache_time: 0, is_personal: true });
+          return new Response("ok", { status: 200 });
+        }
+
+        const botUsername = (env.BOT_USERNAME || "").replace(/^@/, "");
+        const addToGroupLink = botUsername ? `https://t.me/${botUsername}?startgroup=start` : "";
+        const openBotLink = botUsername ? `https://t.me/${botUsername}` : "";
+        const inviteLines = [
+          "سلام! 👋",
+          "برای ساخت آزمون تازه با ربات اکزام‌بات این مراحل را انجام بده:",
+          "• دستور <code>/startgame</code> را در گروه یا گفت‌وگوی خصوصی با ربات بفرست تا اتاق ساخته شود.",
+          "• پیام معرفی را برای دوستانت بفرست و بعد از آماده شدن، روی «🚀 آغاز بازی» بزنید.",
+        ];
+        if (addToGroupLink) {
+          inviteLines.push("", `➕ افزودن سریع ربات به گروه: ${addToGroupLink}`);
+        }
+        const inviteText = inviteLines.join("\n");
+
+        const articleKeyboard = [];
+        if (addToGroupLink) {
+          articleKeyboard.push([
+            {
+              text: "➕ افزودن به گروه",
+              url: addToGroupLink,
+            },
+          ]);
+        }
+        if (openBotLink) {
+          articleKeyboard.push([
+            {
+              text: "🤖 شروع گفتگو با ربات",
+              url: openBotLink,
+            },
+          ]);
+        }
+
+        const results = [
+          {
+            type: "article",
+            id: "startgame-invite",
+            title: "دعوت به آزمون اکزام‌بات",
+            description: "راهنمای ساخت بازی جدید با دستور /startgame",
+            input_message_content: {
+              message_text: inviteText,
+              parse_mode: "HTML",
+            },
+            reply_markup: articleKeyboard.length ? { inline_keyboard: articleKeyboard } : undefined,
+          },
+        ];
+
+        await tg.answerInlineQuery(env, iq.id, results, { cache_time: 0, is_personal: true });
+        return new Response("ok", { status: 200 });
       }
 
       // دکمه‌های اینلاین
@@ -1187,7 +1278,7 @@ export default {
         url: webhookUrl,
         secret_token: env.TG_WEBHOOK_SECRET,
         drop_pending_updates: true,
-        allowed_updates: ["message", "callback_query"],
+        allowed_updates: ["message", "callback_query", "inline_query"],
       });
       return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json; charset=UTF-8" } });
     }
