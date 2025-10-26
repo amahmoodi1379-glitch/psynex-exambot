@@ -848,18 +848,13 @@ export default {
           }
           inviteKeyboard.push([
             {
-              text: "📨 دعوت برای دوست",
-              switch_inline_query: "startgame",
+              text: "🎮 بازی در گروه",
+              switch_inline_query: "group",
             },
-            botUsername
-              ? {
-                  text: "🚀 بازی دونفره در پی‌وی",
-                  url: `https://t.me/${botUsername}?start=startgame`,
-                }
-              : {
-                  text: "🗣️ دعوت در همین چت",
-                  switch_inline_query_current_chat: "startgame",
-                },
+            {
+              text: "👤 بازی در پیوی",
+              switch_inline_query: "private",
+            },
           ]);
           const welcomeText = `سلام 👋
 من ربات آزمون ساینکس هستم. می‌تونی آزمون‌های چندگزینه‌ای بسازی، دوستانت رو دعوت کنی و نتایج رو یکجا ببینی.
@@ -883,8 +878,14 @@ export default {
         const normalizedQuery = rawQuery
           .replace(/^@[^\s]+\s+/i, "")
           .replace(/^\//, "")
+          .trim()
           .toLowerCase();
-        const shouldAnswer = !normalizedQuery || normalizedQuery.startsWith("startgame");
+        const tokens = normalizedQuery ? normalizedQuery.split(/\s+/).filter(Boolean) : [];
+        const tokenSet = new Set(tokens);
+        const wantsStartgame = tokens.some((token) => token.startsWith("startgame"));
+        const wantsGroup = tokenSet.has("group") || tokenSet.has("گروه");
+        const wantsPrivate = tokenSet.has("private") || tokenSet.has("pv") || tokenSet.has("pm") || tokenSet.has("پیوی");
+        const shouldAnswer = !normalizedQuery || wantsStartgame || wantsGroup || wantsPrivate;
 
         if (!shouldAnswer) {
           await tg.answerInlineQuery(env, iq.id, [], { cache_time: 0, is_personal: true });
@@ -894,16 +895,45 @@ export default {
         const botUsername = (env.BOT_USERNAME || "").replace(/^@/, "");
         const addToGroupLink = botUsername ? `https://t.me/${botUsername}?startgroup=start` : "";
         const openBotLink = botUsername ? `https://t.me/${botUsername}?start=startgame` : "";
-        const inviteLines = [
+        const groupArticle = {
+          type: "article",
+          id: "startgame-group-command",
+          title: "🎮 ارسال /startgame به گروه",
+          description: "فرستادن دستور شروع بازی در یک گروه",
+          input_message_content: {
+            message_text: "/startgame",
+          },
+        };
+
+        const privateInviteLines = [
+          "سلام! 👋",
+          "بیا یک آزمون خصوصی در اکزام‌بات بازی کنیم.",
+        ];
+        if (openBotLink) {
+          privateInviteLines.push("", `برای شروع بازی خصوصی روی لینک زیر بزن: ${openBotLink}`);
+        } else {
+          privateInviteLines.push("", "برای شروع، ربات را پیدا کن و پس از /start دستور /startgame را بفرست.");
+        }
+        const privateArticle = {
+          type: "article",
+          id: "startgame-private-invite",
+          title: "👤 دعوت به بازی خصوصی",
+          description: "ارسال لینک شروع بازی خصوصی برای دوستت",
+          input_message_content: {
+            message_text: privateInviteLines.join("\n"),
+          },
+        };
+
+        const guideLines = [
           "سلام! 👋",
           "برای ساخت آزمون تازه با ربات اکزام‌بات این مراحل را انجام بده:",
-          "• دستور <code>/startgame</code> را در گروه یا گفت‌وگوی خصوصی با ربات بفرست تا اتاق ساخته شود.",
-          "• پیام معرفی را برای دوستانت بفرست و بعد از آماده شدن، روی «🚀 آغاز بازی» بزنید.",
+          "• دستور <code>/startgame</code> را در گروه بفرست تا اتاق ساخته شود.",
+          "• اگر می‌خواهی با یک دوست خصوصی بازی کنی، لینک خصوصی را برایش بفرست.",
         ];
         if (addToGroupLink) {
-          inviteLines.push("", `➕ افزودن سریع ربات به گروه: ${addToGroupLink}`);
+          guideLines.push("", `➕ افزودن سریع ربات به گروه: ${addToGroupLink}`);
         }
-        const inviteText = inviteLines.join("\n");
+        const guideText = guideLines.join("\n");
 
         const articleKeyboard = [];
         if (addToGroupLink) {
@@ -923,19 +953,25 @@ export default {
           ]);
         }
 
-        const results = [
-          {
-            type: "article",
-            id: "startgame-invite",
-            title: "دعوت به آزمون اکزام‌بات",
-            description: "راهنمای ساخت بازی جدید با دستور /startgame",
-            input_message_content: {
-              message_text: inviteText,
-              parse_mode: "HTML",
-            },
-            reply_markup: articleKeyboard.length ? { inline_keyboard: articleKeyboard } : undefined,
+        const inviteArticle = {
+          type: "article",
+          id: "startgame-guide",
+          title: "📘 راهنمای شروع بازی",
+          description: "توضیح کامل برای دعوت دوستان و شروع بازی",
+          input_message_content: {
+            message_text: guideText,
+            parse_mode: "HTML",
           },
-        ];
+          reply_markup: articleKeyboard.length ? { inline_keyboard: articleKeyboard } : undefined,
+        };
+
+        const results = [];
+        if (wantsPrivate && !wantsGroup) {
+          results.push(privateArticle, groupArticle);
+        } else {
+          results.push(groupArticle, privateArticle);
+        }
+        results.push(inviteArticle);
 
         await tg.answerInlineQuery(env, iq.id, results, { cache_time: 0, is_personal: true });
         return new Response("ok", { status: 200 });
