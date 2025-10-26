@@ -942,6 +942,27 @@ export default {
             },
             reply_markup: articleKeyboard.length ? { inline_keyboard: articleKeyboard } : undefined,
           },
+          {
+            type: "article",
+            id: "startgame-command",
+            title: "ارسال دستور /startgame به گروه",
+            description: "پیامی آماده برای فرستادن دستور /startgame",
+            input_message_content: {
+              message_text: "/startgame",
+            },
+            reply_markup: addToGroupLink
+              ? {
+                  inline_keyboard: [
+                    [
+                      {
+                        text: "➕ افزودن به گروه",
+                        url: addToGroupLink,
+                      },
+                    ],
+                  ],
+                }
+              : undefined,
+          },
         ];
 
         await tg.answerInlineQuery(env, iq.id, results, { cache_time: 0, is_personal: true });
