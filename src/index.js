@@ -903,7 +903,7 @@ export default {
         const openBotLink = botUsername ? `https://t.me/${botUsername}?start=startgame` : "";
         const inviteLines = [
           "سلام! 👋",
-          "برای ساخت آزمون تازه با ربات اکزام‌بات این مراحل را انجام بده:",
+          "برای ساخت آزمون تازه با ربات ساینکس این مراحل را انجام بده:",
           "• دستور <code>/startgame</code> را در گروه یا گفت‌وگوی خصوصی با ربات بفرست تا اتاق ساخته شود.",
           "• پیام معرفی را برای دوستانت بفرست و بعد از آماده شدن، روی «🚀 آغاز بازی» بزنید.",
         ];
@@ -934,7 +934,7 @@ export default {
           {
             type: "article",
             id: "startgame-invite",
-            title: "دعوت به آزمون اکزام‌بات",
+            title: "دعوت به آزمون ربات ساینکس",
             description: "راهنمای ساخت بازی جدید با دستور /startgame",
             input_message_content: {
               message_text: inviteText,
@@ -1353,7 +1353,7 @@ export default {
     }
 
     // ---------- Health ----------
-    if (url.pathname === "/") return new Response("psynex-exambot: OK", { status: 200 });
+    if (url.pathname === "/") return new Response("psynex-sainex-bot: OK", { status: 200 });
     if (url.pathname === "/health")
       return new Response(JSON.stringify({ ok: true, ts: Date.now() }), { status: 200, headers: { "content-type": "application/json; charset=UTF-8" } });
 
