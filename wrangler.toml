@@ -18,4 +18,4 @@ REQUIRED_CHANNEL = "@psynex"
 
 [[r2_buckets]]
 binding = "QUESTIONS"              # ← این باید QUESTIONS باشد
-bucket_name = "psynex-questions"   # ← اسم واقعی باکت شما
+bucket_name = "exambot-questions"   # ← اسم واقعی باکت شما
