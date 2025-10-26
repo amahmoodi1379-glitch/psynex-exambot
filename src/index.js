@@ -849,11 +849,23 @@ export default {
           inviteKeyboard.push([
             {
               text: "📨 دعوت برای دوست",
-              switch_inline_query: "startgame",
+              switch_inline_query_chosen_chat: {
+                query: "startgame",
+                allow_user_chats: true,
+                allow_bot_chats: false,
+                allow_group_chats: false,
+                allow_channel_chats: false,
+              },
             },
             {
               text: "🗣️ دعوت در همین چت",
-              switch_inline_query_current_chat: "startgame",
+              switch_inline_query_chosen_chat: {
+                query: "startgame",
+                allow_user_chats: false,
+                allow_bot_chats: false,
+                allow_group_chats: true,
+                allow_channel_chats: false,
+              },
             },
           ]);
           const welcomeText = `سلام 👋
