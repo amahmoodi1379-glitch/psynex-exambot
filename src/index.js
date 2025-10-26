@@ -816,8 +816,12 @@ export default {
           }
           inviteKeyboard.push([
             {
-              text: "📨 دعوت در گفت‌وگو",
-              switch_inline_query: "/startgame",
+              text: "📨 دعوت برای دوست",
+              switch_inline_query: "startgame",
+            },
+            {
+              text: "🗣️ دعوت در همین چت",
+              switch_inline_query_current_chat: "startgame",
             },
           ]);
           const welcomeText = `سلام 👋
@@ -825,7 +829,7 @@ export default {
 
 چطور شروع کنم؟
 • دستور <code>/startgame</code> را در گفت‌وگوی خصوصی یا گروه بفرست تا یک اتاق تازه بسازیم.
-• پیام تنظیمات را برای دوستانت فوروارد کن یا از دکمهٔ «📨 دعوت در گفت‌وگو» همین پایین استفاده کن.
+• پیام تنظیمات را برای دوستانت فوروارد کن یا از دکمه‌های دعوت همین پایین استفاده کن.
 • بعد از آماده شدن همه، روی «🚀 آغاز بازی» بزن تا سؤال‌ها ارسال شوند.
 
 برای مرور پاسخ‌ها پس از پایان بازی از دکمهٔ «🧾 مرور گروهی» در پیام نتایج گروه کمک بگیر.`;
@@ -838,18 +842,49 @@ export default {
 
       if (update.inline_query) {
         const iq = update.inline_query;
+        const rawQuery = (iq.query || "").trim();
+        const normalizedQuery = rawQuery
+          .replace(/^@[^\s]+\s+/i, "")
+          .replace(/^\//, "")
+          .toLowerCase();
+        const shouldAnswer = !normalizedQuery || normalizedQuery.startsWith("startgame");
+
+        if (!shouldAnswer) {
+          await tg.answerInlineQuery(env, iq.id, [], { cache_time: 0, is_personal: true });
+          return new Response("ok", { status: 200 });
+        }
+
         const botUsername = (env.BOT_USERNAME || "").replace(/^@/, "");
-        const inviteLink = botUsername ? `https://t.me/${botUsername}?startgroup=start` : "";
+        const addToGroupLink = botUsername ? `https://t.me/${botUsername}?startgroup=start` : "";
+        const openBotLink = botUsername ? `https://t.me/${botUsername}` : "";
         const inviteLines = [
           "سلام! 👋",
           "برای ساخت آزمون تازه با ربات اکزام‌بات این مراحل را انجام بده:",
           "• دستور <code>/startgame</code> را در گروه یا گفت‌وگوی خصوصی با ربات بفرست تا اتاق ساخته شود.",
           "• پیام معرفی را برای دوستانت بفرست و بعد از آماده شدن، روی «🚀 آغاز بازی» بزنید.",
         ];
-        if (inviteLink) {
-          inviteLines.push("", `افزودن سریع ربات به گروه: ${inviteLink}`);
+        if (addToGroupLink) {
+          inviteLines.push("", `➕ افزودن سریع ربات به گروه: ${addToGroupLink}`);
         }
         const inviteText = inviteLines.join("\n");
+
+        const articleKeyboard = [];
+        if (addToGroupLink) {
+          articleKeyboard.push([
+            {
+              text: "➕ افزودن به گروه",
+              url: addToGroupLink,
+            },
+          ]);
+        }
+        if (openBotLink) {
+          articleKeyboard.push([
+            {
+              text: "🤖 شروع گفتگو با ربات",
+              url: openBotLink,
+            },
+          ]);
+        }
 
         const results = [
           {
@@ -861,6 +896,7 @@ export default {
               message_text: inviteText,
               parse_mode: "HTML",
             },
+            reply_markup: articleKeyboard.length ? { inline_keyboard: articleKeyboard } : undefined,
           },
         ];
 
