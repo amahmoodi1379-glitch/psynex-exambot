@@ -1,4 +1,4 @@
-name = "psynex-sainex-bot"
+name = "psynex-exambot"
 main = "src/index.js"
 compatibility_date = "2025-10-23"
 
@@ -13,9 +13,9 @@ new_sqlite_classes = ["RoomDO"]
 
 # 🟢 متغیرهای غیرحساس که باید بعد از هر دپلوی باقی بمانند
 [vars]
-BOT_USERNAME = "psynex_sainexbot"   # ← مقدار واقعی باید دقیقاً با یوزرنیم تلگرام تازهٔ ربات ساینکس یکسان باشد
+BOT_USERNAME = "psynex_exambot"   # ← مقدار واقعی باید دقیقاً با یوزرنیم تلگرام تازهٔ ربات ساینکس یکسان باشد
 REQUIRED_CHANNEL = "@psynex"
 
 [[r2_buckets]]
 binding = "QUESTIONS"              # ← این باید QUESTIONS باشد
-bucket_name = "sainex-questions"   # ← اسم واقعی باکت شما
+bucket_name = "psynex-questions"   # ← اسم واقعی باکت شما

@@ -1352,7 +1352,7 @@ export default {
     }
 
     // ---------- Health ----------
-    if (url.pathname === "/") return new Response("psynex-sainex-bot: OK", { status: 200 });
+    if (url.pathname === "/") return new Response("psynex-exambot: OK", { status: 200 });
     if (url.pathname === "/health")
       return new Response(JSON.stringify({ ok: true, ts: Date.now() }), { status: 200, headers: { "content-type": "application/json; charset=UTF-8" } });
 
