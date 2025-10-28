@@ -547,9 +547,14 @@ async function migrateCourseIds(env) {
 
   stats.remappedCourses = mappings.length;
 
+  const keysToDelete = [];
+
+  // Phase 1: Copy all objects for the mappings. Abort before proceeding if any copy fails.
   for (const { oldId, newId } of mappings) {
+    if (errors.length) break;
     if (!oldId) continue;
     for (const template of KNOWN_TEMPLATES) {
+      if (errors.length) break;
       const templateKey = String(template);
       if (!stats.templates[templateKey]) {
         stats.templates[templateKey] = { scanned: 0, copied: 0, deleted: 0 };
@@ -558,9 +563,11 @@ async function migrateCourseIds(env) {
       const prefix = `${QUESTIONS_PREFIX}/${oldId}/${templateKey}/`;
       let cursor;
       do {
+        if (errors.length) break;
         const res = await env.QUESTIONS.list({ prefix, limit: 1000, cursor });
         const objects = res?.objects || [];
         for (const obj of objects) {
+          if (errors.length) break;
           stats.scannedKeys += 1;
           templateStats.scanned += 1;
           const suffix = obj.key.slice(prefix.length);
@@ -577,6 +584,7 @@ async function migrateCourseIds(env) {
             }
             stats.copiedKeys += 1;
             templateStats.copied += 1;
+            keysToDelete.push(obj.key);
           } catch (err) {
             errors.push({
               key: obj.key,
@@ -586,33 +594,50 @@ async function migrateCourseIds(env) {
               newId,
               error: err?.message || String(err),
             });
-            continue;
-          }
-
-          try {
-            await env.QUESTIONS.delete(obj.key);
-            stats.deletedKeys += 1;
-            templateStats.deleted += 1;
-          } catch (err) {
-            errors.push({
-              key: obj.key,
-              stage: "delete",
-              template: templateKey,
-              oldId,
-              newId,
-              error: err?.message || String(err),
-            });
           }
         }
         cursor = res?.truncated ? res.cursor : null;
-      } while (cursor);
+      } while (cursor && !errors.length);
     }
   }
 
   let savedCourses = false;
   if (!errors.length) {
-    await saveCourses(env, updatedCourses);
-    savedCourses = true;
+    try {
+      await saveCourses(env, updatedCourses);
+      savedCourses = true;
+    } catch (err) {
+      errors.push({
+        stage: "save-courses",
+        error: err?.message || String(err),
+      });
+    }
+  }
+
+  if (savedCourses) {
+    for (const key of keysToDelete) {
+      try {
+        await env.QUESTIONS.delete(key);
+        stats.deletedKeys += 1;
+        const parts = key.split("/");
+        if (parts.length > 2) {
+          const templateKey = parts[2];
+          const templateStats = stats.templates[templateKey];
+          if (templateStats) {
+            templateStats.deleted += 1;
+          }
+        }
+      } catch (err) {
+        const parts = key.split("/");
+        errors.push({
+          key,
+          stage: "delete",
+          template: parts[2] || "unknown",
+          oldId: parts[1] || "unknown",
+          error: err?.message || String(err),
+        });
+      }
+    }
   }
 
   stats.savedCourses = savedCourses;
