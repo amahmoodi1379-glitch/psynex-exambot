@@ -121,6 +121,7 @@ async function handleStartGameRequest({ env, msg, getStubByKey }) {
 const COURSES_KEY = "admin/courses.json"; // [{id,title}]
 const QUESTIONS_PREFIX = "questions";
 const COURSES_PAGE_SIZE = 8;
+const COURSES_KEYBOARD_COLUMNS = 2;
 const PERSIAN_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
 
 async function getCourses(env) {
@@ -143,10 +144,7 @@ async function saveCourses(env, courses) {
 }
 
 function toPersianDigits(value) {
-  return String(value ?? "")
-    .split("")
-    .map((ch) => (/[0-9]/.test(ch) ? PERSIAN_DIGITS[Number(ch)] ?? ch : ch))
-    .join("");
+  return String(value ?? "").replace(/[0-9]/g, (digit) => PERSIAN_DIGITS[Number(digit)] ?? digit);
 }
 
 function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = COURSES_PAGE_SIZE }) {
@@ -163,7 +161,7 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
   let row = [];
   for (const course of pageItems) {
     row.push({ text: course.title, callback_data: `c:${rid}:${course.id}${hostSuffix}` });
-    if (row.length === 2) {
+    if (row.length === COURSES_KEYBOARD_COLUMNS) {
       keyboard.push(row);
       row = [];
     }
@@ -171,12 +169,16 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
   if (row.length) keyboard.push(row);
 
   if (totalPages > 1) {
-    const prevTarget = currentPage > 1 ? currentPage - 1 : 1;
-    const nextTarget = currentPage < totalPages ? currentPage + 1 : totalPages;
-    keyboard.push([
-      { text: "⬅️", callback_data: `clpage:${rid}:${prevTarget}${hostSuffix}` },
-      { text: "➡️", callback_data: `clpage:${rid}:${nextTarget}${hostSuffix}` },
-    ]);
+    const navRow = [];
+    if (currentPage > 1) {
+      navRow.push({ text: "⬅️", callback_data: `clpage:${rid}:${currentPage - 1}${hostSuffix}` });
+    }
+    if (currentPage < totalPages) {
+      navRow.push({ text: "➡️", callback_data: `clpage:${rid}:${currentPage + 1}${hostSuffix}` });
+    }
+    if (navRow.length) {
+      keyboard.push(navRow);
+    }
   }
 
   return { keyboard, currentPage, totalPages, pageItems };
@@ -1078,16 +1080,12 @@ export default {
             await tg.answerCallback(env, cq.id, "هیچ درسی تعریف نشده.", true);
             return new Response("ok", { status: 200 });
           }
-          const { keyboard, currentPage, totalPages, pageItems } = buildCoursePage({
+          const { keyboard, currentPage, totalPages } = buildCoursePage({
             courses,
             page: 1,
             rid,
             hostSuffix,
           });
-          if (!pageItems.length) {
-            await tg.answerCallback(env, cq.id, "هیچ درسی تعریف نشده.", true);
-            return new Response("ok", { status: 200 });
-          }
           const messageText = buildCourseListMessage(currentPage, totalPages);
           await tg.answerCallback(env, cq.id, "لیست درس‌ها");
           await tg.sendMessage(env, chat_id, messageText, {
@@ -1116,16 +1114,12 @@ export default {
             return new Response("ok", { status: 200 });
           }
 
-          const { keyboard, currentPage, totalPages, pageItems } = buildCoursePage({
+          const { keyboard, currentPage, totalPages } = buildCoursePage({
             courses,
             page: requestedPage,
             rid,
             hostSuffix,
           });
-          if (!pageItems.length) {
-            await tg.answerCallback(env, cq.id, "هیچ درسی تعریف نشده.", true);
-            return new Response("ok", { status: 200 });
-          }
           if (!chat_id || !msg.message_id) {
             await tg.answerCallback(env, cq.id, "پیام یافت نشد.", true);
             return new Response("ok", { status: 200 });
