@@ -120,6 +120,9 @@ async function handleStartGameRequest({ env, msg, getStubByKey }) {
 // ==============================
 const COURSES_KEY = "admin/courses.json"; // [{id,title}]
 const QUESTIONS_PREFIX = "questions";
+const COURSES_PAGE_SIZE = 8;
+const COURSES_KEYBOARD_COLUMNS = 2;
+const PERSIAN_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
 
 async function getCourses(env) {
   try {
@@ -138,6 +141,60 @@ async function saveCourses(env, courses) {
     httpMetadata: { contentType: "application/json; charset=utf-8" },
   });
   return true;
+}
+
+function toPersianDigits(value) {
+  return String(value ?? "").replace(/[0-9]/g, (digit) => {
+    const index = digit.charCodeAt(0) - 48; // '0'.charCodeAt(0) === 48
+    return PERSIAN_DIGITS[index] ?? digit;
+  });
+}
+
+function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = COURSES_PAGE_SIZE }) {
+  const safePageSize = Number.isInteger(pageSize) && pageSize > 0 ? pageSize : COURSES_PAGE_SIZE;
+  const totalCourses = Array.isArray(courses) ? courses.length : 0;
+  const totalPages = Math.max(1, Math.ceil(totalCourses / safePageSize));
+  let requestedPage = Number.parseInt(String(page ?? 1), 10);
+  if (Number.isNaN(requestedPage) || requestedPage < 1) requestedPage = 1;
+  const currentPage = Math.min(requestedPage, totalPages);
+  const startIndex = (currentPage - 1) * safePageSize;
+  const pageItems = courses.slice(startIndex, startIndex + safePageSize);
+
+  const keyboard = [];
+  let row = [];
+  for (const course of pageItems) {
+    row.push({ text: course.title, callback_data: `c:${rid}:${course.id}${hostSuffix}` });
+    if (row.length === COURSES_KEYBOARD_COLUMNS) {
+      keyboard.push(row);
+      row = [];
+    }
+  }
+  if (row.length) keyboard.push(row);
+
+  if (totalPages > 1) {
+    const prevTarget = currentPage > 1 ? currentPage - 1 : null;
+    const nextTarget = currentPage < totalPages ? currentPage + 1 : null;
+    const navRow = [];
+    if (prevTarget) {
+      navRow.push({ text: "⬅️", callback_data: `clpage:${rid}:${prevTarget}${hostSuffix}` });
+    }
+    if (nextTarget) {
+      navRow.push({ text: "➡️", callback_data: `clpage:${rid}:${nextTarget}${hostSuffix}` });
+    }
+    if (navRow.length) {
+      keyboard.push(navRow);
+    }
+  }
+
+  return { keyboard, currentPage, totalPages, pageItems };
+}
+
+function buildCourseListMessage(currentPage, totalPages) {
+  let text = "🎓 یک درس را انتخاب کنید:";
+  if (totalPages > 1) {
+    text += `\nصفحه ${toPersianDigits(currentPage)} از ${toPersianDigits(totalPages)}`;
+  }
+  return text;
 }
 function makeSlugFromTitle(title) {
   const t = String(title || "").trim();
@@ -956,14 +1013,16 @@ export default {
         const msg = cq.message || {};
         const chat_id = msg.chat?.id;
         const from = cq.from;
-        const parts = (cq.data || "").split(":"); // cl:<rid>[:host*] | c:<rid>:<courseId>[:host*] | ...
+        const parts = (cq.data || "").split(":"); // cl:<rid>[:host*] | clpage:<rid>:<page>[:host*] | c:<rid>:<courseId>[:host*] | ...
         const hostMarker = parts.length ? parts[parts.length - 1] : null;
         let hostChatId = chat_id;
+        let hostSuffix = "";
         if (hostMarker && hostMarker.startsWith("host")) {
           const decoded = decChatId(hostMarker.slice(4));
           if (decoded !== null && decoded !== undefined && !Number.isNaN(decoded)) {
             hostChatId = decoded;
             parts.pop();
+            hostSuffix = `:${hostMarker}`;
           }
         }
         const act = parts[0];
@@ -1026,15 +1085,60 @@ export default {
             await tg.answerCallback(env, cq.id, "هیچ درسی تعریف نشده.", true);
             return new Response("ok", { status: 200 });
           }
-          const rows = [];
-          let row = [];
-          for (const c of courses) {
-            row.push({ text: c.title, callback_data: `c:${rid}:${c.id}` });
-            if (row.length === 2) { rows.push(row); row = []; }
-          }
-          if (row.length) rows.push(row);
+          const { keyboard, currentPage, totalPages } = buildCoursePage({
+            courses,
+            page: 1,
+            rid,
+            hostSuffix,
+          });
+          const messageText = buildCourseListMessage(currentPage, totalPages);
           await tg.answerCallback(env, cq.id, "لیست درس‌ها");
-          await tg.sendMessage(env, chat_id, "🎓 یک درس را انتخاب کنید:", { reply_markup: { inline_keyboard: rows } });
+          await tg.sendMessage(env, chat_id, messageText, {
+            reply_markup: { inline_keyboard: keyboard },
+          });
+          return new Response("ok", { status: 200 });
+        }
+
+        if (act === "clpage") {
+          const ok = await ensureMemberOrNotify();
+          if (!ok) return new Response("ok", { status: 200 });
+
+          const requestedPage = parts[2];
+          const courses = await getCourses(env);
+          if (!courses.length) {
+            await tg.answerCallback(env, cq.id, "هیچ درسی تعریف نشده.", true);
+            if (chat_id && msg.message_id) {
+              await tg.call(env, "editMessageText", {
+                chat_id,
+                message_id: msg.message_id,
+                text: "هیچ درسی تعریف نشده.",
+                parse_mode: "HTML",
+                reply_markup: { inline_keyboard: [] },
+              });
+            }
+            return new Response("ok", { status: 200 });
+          }
+
+          const { keyboard, currentPage, totalPages } = buildCoursePage({
+            courses,
+            page: requestedPage,
+            rid,
+            hostSuffix,
+          });
+          if (!chat_id || !msg.message_id) {
+            await tg.answerCallback(env, cq.id, "پیام یافت نشد.", true);
+            return new Response("ok", { status: 200 });
+          }
+
+          const messageText = buildCourseListMessage(currentPage, totalPages);
+          await tg.call(env, "editMessageText", {
+            chat_id,
+            message_id: msg.message_id,
+            text: messageText,
+            parse_mode: "HTML",
+            reply_markup: { inline_keyboard: keyboard },
+          });
+          await tg.answerCallback(env, cq.id, `صفحه ${toPersianDigits(currentPage)} از ${toPersianDigits(totalPages)}`);
           return new Response("ok", { status: 200 });
         }
 
