@@ -143,6 +143,8 @@ const COURSE_ID_CORE_MAX_LENGTH = Math.max(
   COURSE_ID_MAX_LENGTH - COURSE_ID_SUFFIX_LENGTH - COURSE_SLUG_SEPARATOR.length
 );
 const COURSE_ID_FALLBACK = "course";
+export const COURSE_ID_COMPACT_MAX_LENGTH = 12;
+const SHORT_COURSE_ID_PATTERN = /^[a-z0-9_-]+$/;
 
 async function getCourses(env) {
   try {
@@ -195,28 +197,92 @@ function assertCallbackWithinLimit(value, context) {
   }
 }
 
+function sanitizeCourseIdFragment(input, maxBytes) {
+  if (!input) return "";
+  const safeMax = Number.isInteger(maxBytes) && maxBytes > 0 ? maxBytes : COURSE_ID_MAX_LENGTH;
+  let out = String(input)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-_]+/, "")
+    .replace(/[-_]+$/, "");
+  out = trimUtf8ToBytes(out, safeMax);
+  out = out.replace(/^[-_]+/, "").replace(/[-_]+$/, "");
+  return out;
+}
+
 export function normalizeCourseId(value, { maxBytes = COURSE_ID_MAX_LENGTH } = {}) {
   const safeMax = Number.isInteger(maxBytes) && maxBytes > 0 ? maxBytes : COURSE_ID_MAX_LENGTH;
 
   const raw = String(value ?? "").trim().toLowerCase();
   const fallbackBase = String(COURSE_ID_FALLBACK).toLowerCase();
 
-  const sanitize = (input) => {
-    if (!input) return "";
-    let out = String(input)
-      .replace(/\s+/g, "-")
-      .replace(/[^a-z0-9_-]+/g, "-")
-      .replace(/-+/g, "-")
-      .replace(/^[-_]+/, "")
-      .replace(/[-_]+$/, "");
-    out = trimUtf8ToBytes(out, safeMax);
-    return out;
-  };
-
-  let normalized = sanitize(raw);
-  if (!normalized) normalized = sanitize(fallbackBase);
+  let normalized = sanitizeCourseIdFragment(raw, safeMax);
+  if (!normalized) normalized = sanitizeCourseIdFragment(fallbackBase, safeMax);
 
   return normalized;
+}
+
+export function sanitizeShortCourseId(value, { maxBytes = COURSE_ID_COMPACT_MAX_LENGTH } = {}) {
+  const safeMax = Number.isInteger(maxBytes) && maxBytes > 0 ? maxBytes : COURSE_ID_COMPACT_MAX_LENGTH;
+  return sanitizeCourseIdFragment(String(value ?? ""), safeMax);
+}
+
+function isShortCourseId(value) {
+  if (!value) return false;
+  if (!SHORT_COURSE_ID_PATTERN.test(value)) return false;
+  return utf8ByteLength(value) <= COURSE_ID_COMPACT_MAX_LENGTH;
+}
+
+function chooseUniqueShortId(preferred, used) {
+  if (!preferred) return null;
+  let attempt = 0;
+  while (attempt <= 1000) {
+    let candidate = preferred;
+    if (attempt > 0) {
+      const suffix = attempt.toString(36);
+      const maxBaseBytes = COURSE_ID_COMPACT_MAX_LENGTH - suffix.length - 1;
+      if (maxBaseBytes <= 0) return null;
+      let base = sanitizeShortCourseId(preferred, { maxBytes: maxBaseBytes });
+      if (!base) return null;
+      candidate = `${base}-${suffix}`;
+    }
+    if (!used.has(candidate)) {
+      used.add(candidate);
+      return candidate;
+    }
+    attempt += 1;
+  }
+  return null;
+}
+
+function generateRandomShortId(used) {
+  for (let attempt = 0; attempt < 1000; attempt += 1) {
+    const randomBase = sanitizeShortCourseId(`${COURSE_ID_FALLBACK}-${generateCourseSuffix()}`);
+    const candidate = chooseUniqueShortId(randomBase, used);
+    if (candidate) return candidate;
+  }
+  throw new Error("Failed to generate a unique compact course id");
+}
+
+function allocateCompactCourseId({ title, currentId }, usedIds) {
+  const targetSet = usedIds || new Set();
+  const normalizedCurrent = String(currentId ?? "").trim();
+  if (isShortCourseId(normalizedCurrent) && !targetSet.has(normalizedCurrent)) {
+    targetSet.add(normalizedCurrent);
+    return normalizedCurrent;
+  }
+
+  const preferredFromTitle = sanitizeShortCourseId(title);
+  let candidate = chooseUniqueShortId(preferredFromTitle, targetSet);
+  if (!candidate) {
+    const fallbackFromOld = sanitizeShortCourseId(normalizedCurrent);
+    candidate = chooseUniqueShortId(fallbackFromOld, targetSet);
+  }
+  if (!candidate) candidate = generateRandomShortId(targetSet);
+  return candidate;
 }
 
 function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = COURSES_PAGE_SIZE }) {
@@ -456,6 +522,111 @@ async function putQuestionsToR2(env, { course, template, questions }, { skipExis
   }
   return { keys, skipped };
 }
+async function migrateCourseIds(env) {
+  const courses = await getCourses(env);
+  const usedIds = new Set();
+  const updatedCourses = [];
+  const mappings = [];
+  const errors = [];
+  const stats = {
+    totalCourses: courses.length,
+    remappedCourses: 0,
+    scannedKeys: 0,
+    copiedKeys: 0,
+    deletedKeys: 0,
+    templates: {},
+  };
+
+  for (const course of courses) {
+    const title = String(course?.title ?? "").trim();
+    const oldId = String(course?.id ?? "").trim();
+    const newId = allocateCompactCourseId({ title, currentId: oldId }, usedIds);
+    updatedCourses.push({ ...course, id: newId });
+    if (newId !== oldId) mappings.push({ oldId, newId, title });
+  }
+
+  stats.remappedCourses = mappings.length;
+
+  for (const { oldId, newId } of mappings) {
+    if (!oldId) continue;
+    for (const template of KNOWN_TEMPLATES) {
+      const templateKey = String(template);
+      if (!stats.templates[templateKey]) {
+        stats.templates[templateKey] = { scanned: 0, copied: 0, deleted: 0 };
+      }
+      const templateStats = stats.templates[templateKey];
+      const prefix = `${QUESTIONS_PREFIX}/${oldId}/${templateKey}/`;
+      let cursor;
+      do {
+        const res = await env.QUESTIONS.list({ prefix, limit: 1000, cursor });
+        const objects = res?.objects || [];
+        for (const obj of objects) {
+          stats.scannedKeys += 1;
+          templateStats.scanned += 1;
+          const suffix = obj.key.slice(prefix.length);
+          const newKey = `${QUESTIONS_PREFIX}/${newId}/${templateKey}/${suffix}`;
+          try {
+            if (typeof env.QUESTIONS.copy === "function") {
+              await env.QUESTIONS.copy(obj.key, newKey);
+            } else {
+              const file = await env.QUESTIONS.get(obj.key);
+              if (!file) throw new Error("source object missing");
+              const body = await file.arrayBuffer();
+              const meta = obj.httpMetadata ? { httpMetadata: obj.httpMetadata } : undefined;
+              await env.QUESTIONS.put(newKey, body, meta);
+            }
+            stats.copiedKeys += 1;
+            templateStats.copied += 1;
+          } catch (err) {
+            errors.push({
+              key: obj.key,
+              stage: "copy",
+              template: templateKey,
+              oldId,
+              newId,
+              error: err?.message || String(err),
+            });
+            continue;
+          }
+
+          try {
+            await env.QUESTIONS.delete(obj.key);
+            stats.deletedKeys += 1;
+            templateStats.deleted += 1;
+          } catch (err) {
+            errors.push({
+              key: obj.key,
+              stage: "delete",
+              template: templateKey,
+              oldId,
+              newId,
+              error: err?.message || String(err),
+            });
+          }
+        }
+        cursor = res?.truncated ? res.cursor : null;
+      } while (cursor);
+    }
+  }
+
+  let savedCourses = false;
+  if (!errors.length) {
+    await saveCourses(env, updatedCourses);
+    savedCourses = true;
+  }
+
+  stats.savedCourses = savedCourses;
+
+  return {
+    ok: errors.length === 0,
+    mappings,
+    stats,
+    updatedCourses,
+    savedCourses,
+    errors,
+  };
+}
+
 async function migrateLegacySets(env) {
   const results = {
     setsProcessed: 0,
@@ -1464,19 +1635,25 @@ export default {
       if (!title)
         return new Response(JSON.stringify({ ok: false, error: "missing title" }), { status: 400, headers: { "content-type": "application/json; charset=utf-8" } });
       const courses = await getCourses(env);
-      const existingIds = new Set(courses.map((c) => String(c.id || "")));
-      let id = "";
-      let attempts = 0;
-      do {
-        id = makeSlugFromTitle(title);
-        attempts += 1;
-      } while (existingIds.has(id) && attempts < 5);
+      const usedIds = new Set();
+      for (const c of courses) {
+        const existing = String(c?.id ?? "").trim();
+        if (existing) usedIds.add(existing);
+      }
+      let id;
+      try {
+        id = allocateCompactCourseId({ title, currentId: null }, usedIds);
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ ok: false, error: "could not generate course id" }),
+          { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
+        );
+      }
       if (!id)
-        return new Response(JSON.stringify({ ok: false, error: "invalid id" }), { status: 500, headers: { "content-type": "application/json; charset=utf-8" } });
-      if (id.length > COURSE_ID_MAX_LENGTH)
-        return new Response(JSON.stringify({ ok: false, error: "generated id too long" }), { status: 400, headers: { "content-type": "application/json; charset=utf-8" } });
-      if (existingIds.has(id))
-        return new Response(JSON.stringify({ ok: false, error: "could not create unique id" }), { status: 409, headers: { "content-type": "application/json; charset=utf-8" } });
+        return new Response(JSON.stringify({ ok: false, error: "invalid id" }), {
+          status: 500,
+          headers: { "content-type": "application/json; charset=utf-8" },
+        });
       courses.push({ id, title });
       await saveCourses(env, courses);
       return new Response(JSON.stringify({ ok: true, courses }, null, 2), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
@@ -1509,6 +1686,31 @@ export default {
       const next = courses.filter(c => c.id !== id);
       await saveCourses(env, next);
       return new Response(JSON.stringify({ ok: true, courses: next }, null, 2), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
+    }
+
+    if (url.pathname === "/admin/migrate-course-ids" && request.method === "POST") {
+      const key = url.searchParams.get("key") || "";
+      if (!env.ADMIN_KEY || key !== env.ADMIN_KEY)
+        return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), {
+          status: 401,
+          headers: { "content-type": "application/json; charset=utf-8" },
+        });
+      try {
+        const result = await migrateCourseIds(env);
+        const status = result.ok ? 200 : 500;
+        return new Response(JSON.stringify(result, null, 2), {
+          status,
+          headers: { "content-type": "application/json; charset=utf-8" },
+        });
+      } catch (e) {
+        return new Response(
+          JSON.stringify({ ok: false, error: e?.message || "course id migration error" }),
+          {
+            status: 500,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          }
+        );
+      }
     }
 
     if (url.pathname === "/admin/migrate-sets" && request.method === "POST") {
