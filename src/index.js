@@ -144,7 +144,10 @@ async function saveCourses(env, courses) {
 }
 
 function toPersianDigits(value) {
-  return String(value ?? "").replace(/[0-9]/g, (digit) => PERSIAN_DIGITS[Number(digit)] ?? digit);
+  return String(value ?? "").replace(/[0-9]/g, (digit) => {
+    const index = digit.charCodeAt(0) - 48; // '0'.charCodeAt(0) === 48
+    return PERSIAN_DIGITS[index] ?? digit;
+  });
 }
 
 function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = COURSES_PAGE_SIZE }) {
@@ -169,12 +172,14 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
   if (row.length) keyboard.push(row);
 
   if (totalPages > 1) {
+    const prevTarget = currentPage > 1 ? currentPage - 1 : null;
+    const nextTarget = currentPage < totalPages ? currentPage + 1 : null;
     const navRow = [];
-    if (currentPage > 1) {
-      navRow.push({ text: "⬅️", callback_data: `clpage:${rid}:${currentPage - 1}${hostSuffix}` });
+    if (prevTarget) {
+      navRow.push({ text: "⬅️", callback_data: `clpage:${rid}:${prevTarget}${hostSuffix}` });
     }
-    if (currentPage < totalPages) {
-      navRow.push({ text: "➡️", callback_data: `clpage:${rid}:${currentPage + 1}${hostSuffix}` });
+    if (nextTarget) {
+      navRow.push({ text: "➡️", callback_data: `clpage:${rid}:${nextTarget}${hostSuffix}` });
     }
     if (navRow.length) {
       keyboard.push(navRow);
