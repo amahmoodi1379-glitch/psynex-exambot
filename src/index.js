@@ -1137,15 +1137,27 @@ export default {
           }
 
           const messageText = buildCourseListMessage(currentPage, totalPages);
-          const editResult = await tg.call(env, "editMessageText", {
-            chat_id,
-            message_id: msg.message_id,
-            text: messageText,
-            parse_mode: "HTML",
-            reply_markup: { inline_keyboard: keyboard },
-          });
-          if (!editResult?.ok) {
-            throw new Error("Telegram editMessageText failed");
+
+          try {
+            const editResult = await tg.call(env, "editMessageText", {
+              chat_id,
+              message_id: msg.message_id,
+              text: messageText,
+              parse_mode: "HTML",
+              reply_markup: { inline_keyboard: keyboard },
+            });
+            if (!editResult?.ok) {
+              throw new Error("Telegram editMessageText failed");
+            }
+          } catch (err) {
+            console.error("course list page edit error", err);
+            await tg.answerCallback(
+              env,
+              cq.id,
+              "بروزرسانی صفحه ممکن نشد. دوباره تلاش کنید.",
+              true
+            );
+            return new Response("ok", { status: 200 });
           }
 
           await tg.answerCallback(
