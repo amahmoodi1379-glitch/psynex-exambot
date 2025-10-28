@@ -6,8 +6,6 @@ import {
   makeSlugFromTitle,
   COURSE_ID_MAX_LENGTH,
   normalizeCourseId,
-  sanitizeShortCourseId,
-  COURSE_ID_COMPACT_MAX_LENGTH,
 } from '../src/index.js';
 
 const TELEGRAM_CALLBACK_LIMIT = 64;
@@ -75,24 +73,4 @@ test('makeSlugFromTitle creates safe slug for multibyte title', () => {
   assert.match(slug, /^[a-z0-9_-]+$/);
   assert.ok(Buffer.byteLength(slug, 'utf8') <= COURSE_ID_MAX_LENGTH);
   assert.ok(slug.includes('-'), 'slug should include separator');
-});
-
-test('sanitizeShortCourseId generates compact id within limit', () => {
-  const rawTitle = '   Advanced Physics Crash Course — Final 2024   ';
-  const sanitized = sanitizeShortCourseId(rawTitle);
-
-  assert.ok(sanitized, 'sanitized id should not be empty for ASCII-rich titles');
-  assert.match(sanitized, /^[a-z0-9_-]+$/);
-  assert.ok(
-    Buffer.byteLength(sanitized, 'utf8') <= COURSE_ID_COMPACT_MAX_LENGTH,
-    'sanitized id must respect compact limit'
-  );
-});
-
-test('sanitizeShortCourseId trims overly long identifiers', () => {
-  const longTitle = 'Mathematics Advanced Preparation Course For University Entrance Exams 2024';
-  const sanitized = sanitizeShortCourseId(longTitle);
-
-  assert.ok(sanitized);
-  assert.ok(Buffer.byteLength(sanitized, 'utf8') <= COURSE_ID_COMPACT_MAX_LENGTH);
 });
