@@ -170,13 +170,55 @@ function toPersianDigits(value) {
   });
 }
 
+function utf8ByteLength(value) {
+  return Buffer.byteLength(String(value ?? ""), "utf8");
+}
+
+function trimUtf8ToBytes(value, maxBytes) {
+  if (!value) return "";
+  let result = String(value);
+  let bytes = utf8ByteLength(result);
+  while (bytes > maxBytes && result.length) {
+    result = result.slice(0, -1);
+    bytes = utf8ByteLength(result);
+  }
+  return result;
+}
+
 function assertCallbackWithinLimit(value, context) {
   if (typeof value !== "string") return;
-  if (value.length > TELEGRAM_CALLBACK_DATA_LIMIT) {
+  const size = utf8ByteLength(value);
+  if (size > TELEGRAM_CALLBACK_DATA_LIMIT) {
     throw new Error(
-      `${context} callback_data exceeds ${TELEGRAM_CALLBACK_DATA_LIMIT} bytes (${value.length})`
+      `${context} callback_data exceeds ${TELEGRAM_CALLBACK_DATA_LIMIT} bytes (${size})`
     );
   }
+}
+
+export function normalizeCourseId(value, { maxBytes = COURSE_ID_MAX_LENGTH } = {}) {
+  const safeMax = Number.isInteger(maxBytes) && maxBytes > 0 ? maxBytes : COURSE_ID_MAX_LENGTH;
+
+  const raw = String(value ?? "").trim().toLowerCase();
+  const fallbackBase = String(COURSE_ID_FALLBACK).toLowerCase();
+
+  const sanitize = (input) => {
+    if (!input) return "";
+    let out = String(input)
+      .replace(/\s+/g, "-")
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^[-_]+/, "")
+      .replace(/[-_]+$/, "");
+    out = trimUtf8ToBytes(out, safeMax);
+    return out;
+  };
+
+  let normalized = sanitize(raw);
+  if (!normalized) normalized = sanitize(fallbackBase);
+  if (!normalized) normalized = sanitize(COURSE_ID_FALLBACK);
+  if (!normalized) normalized = trimUtf8ToBytes(COURSE_ID_FALLBACK, safeMax);
+
+  return normalized;
 }
 
 function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = COURSES_PAGE_SIZE }) {
@@ -194,11 +236,12 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
   const ridPart = String(rid ?? "");
   const suffixPart = String(hostSuffix ?? "");
   for (const course of pageItems) {
-    const courseId = String(course?.id ?? "").trim();
-    if (!courseId) continue;
-    if (courseId.length > COURSE_ID_MAX_LENGTH) {
+    const rawCourseId = String(course?.id ?? "").trim();
+    if (!rawCourseId) continue;
+    const courseId = normalizeCourseId(rawCourseId);
+    if (utf8ByteLength(courseId) > COURSE_ID_MAX_LENGTH) {
       throw new Error(
-        `course id '${courseId}' exceeds ${COURSE_ID_MAX_LENGTH} characters`
+        `course id '${courseId}' exceeds ${COURSE_ID_MAX_LENGTH} bytes`
       );
     }
     const callback = `${COURSE_CALLBACK_PREFIX}${ridPart}${COURSE_CALLBACK_SEPARATOR}${courseId}${suffixPart}`;
@@ -257,22 +300,15 @@ function generateCourseSuffix() {
 }
 
 export function makeSlugFromTitle(title) {
-  const t = String(title || "").trim();
-  const normalized = t
-    .replace(/\s+/g, "-")
-    .replace(/[^\p{L}\p{N}\-_]/gu, "") // اجازهٔ حروف و اعداد همه زبان‌ها + - _
-    .replace(/-+/g, "-")
-    .replace(/^-+/, "")
-    .replace(/-+$/, "")
-    .toLowerCase();
-  const base = normalized || COURSE_ID_FALLBACK;
   const suffix = generateCourseSuffix();
-  const maxCoreLength = COURSE_ID_CORE_MAX_LENGTH;
-  let core = base.slice(0, maxCoreLength);
-  if (!core) core = COURSE_ID_FALLBACK.slice(0, maxCoreLength);
-  if (!core) core = COURSE_ID_FALLBACK;
-  const slug = `${core}${COURSE_SLUG_SEPARATOR}${suffix}`;
-  return slug.length > COURSE_ID_MAX_LENGTH ? slug.slice(0, COURSE_ID_MAX_LENGTH) : slug;
+  let core = normalizeCourseId(title, { maxBytes: COURSE_ID_CORE_MAX_LENGTH });
+  if (!core) core = normalizeCourseId(COURSE_ID_FALLBACK, { maxBytes: COURSE_ID_CORE_MAX_LENGTH });
+  if (!core) core = trimUtf8ToBytes(COURSE_ID_FALLBACK, COURSE_ID_CORE_MAX_LENGTH);
+  if (!core) core = COURSE_ID_FALLBACK.slice(0, COURSE_ID_CORE_MAX_LENGTH);
+  let slug = `${core}${COURSE_SLUG_SEPARATOR}${suffix}`;
+  slug = trimUtf8ToBytes(slug, COURSE_ID_MAX_LENGTH);
+  if (!slug) slug = trimUtf8ToBytes(`${COURSE_ID_FALLBACK}${COURSE_SLUG_SEPARATOR}${suffix}`, COURSE_ID_MAX_LENGTH);
+  return slug || COURSE_ID_FALLBACK;
 }
 function generateQuestionId() {
   return ("Q" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)).toUpperCase();
