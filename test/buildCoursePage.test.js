@@ -1,0 +1,41 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { buildCoursePage, makeSlugFromTitle, COURSE_ID_MAX_LENGTH } from '../src/index.js';
+
+const TELEGRAM_CALLBACK_LIMIT = 64;
+const MAX_HOST_SUFFIX = ':hostp' + 'z'.repeat(13);
+
+function createLongTitle(idx) {
+  const base = 'عنوان بسیار بسیار طولانی برای آزمون '.repeat(4);
+  return `${base.trim()} ${idx}`;
+}
+
+test('buildCoursePage keeps callback_data within Telegram limit', () => {
+  const courses = Array.from({ length: 9 }, (_, idx) => {
+    const title = createLongTitle(idx + 1);
+    const id = makeSlugFromTitle(title);
+    assert.ok(id.length <= COURSE_ID_MAX_LENGTH, `slug should respect limit (${id.length})`);
+    return { id, title };
+  });
+
+  const { keyboard } = buildCoursePage({
+    courses,
+    page: 1,
+    rid: 'abcdefgh',
+    hostSuffix: MAX_HOST_SUFFIX,
+    pageSize: 8,
+  });
+
+  assert.ok(Array.isArray(keyboard) && keyboard.length > 0, 'keyboard should not be empty');
+
+  for (const row of keyboard) {
+    for (const button of row) {
+      if (!button?.callback_data) continue;
+      assert.ok(
+        button.callback_data.length <= TELEGRAM_CALLBACK_LIMIT,
+        `callback_data exceeded limit (${button.callback_data.length}): ${button.callback_data}`
+      );
+    }
+  }
+});
