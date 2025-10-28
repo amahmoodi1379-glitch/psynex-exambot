@@ -215,8 +215,6 @@ export function normalizeCourseId(value, { maxBytes = COURSE_ID_MAX_LENGTH } = {
 
   let normalized = sanitize(raw);
   if (!normalized) normalized = sanitize(fallbackBase);
-  if (!normalized) normalized = sanitize(COURSE_ID_FALLBACK);
-  if (!normalized) normalized = trimUtf8ToBytes(COURSE_ID_FALLBACK, safeMax);
 
   return normalized;
 }
@@ -239,11 +237,6 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
     const rawCourseId = String(course?.id ?? "").trim();
     if (!rawCourseId) continue;
     const courseId = normalizeCourseId(rawCourseId);
-    if (utf8ByteLength(courseId) > COURSE_ID_MAX_LENGTH) {
-      throw new Error(
-        `course id '${courseId}' exceeds ${COURSE_ID_MAX_LENGTH} bytes`
-      );
-    }
     const callback = `${COURSE_CALLBACK_PREFIX}${ridPart}${COURSE_CALLBACK_SEPARATOR}${courseId}${suffixPart}`;
     assertCallbackWithinLimit(callback, `course ${courseId}`);
     row.push({ text: course.title, callback_data: callback });
@@ -301,14 +294,12 @@ function generateCourseSuffix() {
 
 export function makeSlugFromTitle(title) {
   const suffix = generateCourseSuffix();
-  let core = normalizeCourseId(title, { maxBytes: COURSE_ID_CORE_MAX_LENGTH });
-  if (!core) core = normalizeCourseId(COURSE_ID_FALLBACK, { maxBytes: COURSE_ID_CORE_MAX_LENGTH });
-  if (!core) core = trimUtf8ToBytes(COURSE_ID_FALLBACK, COURSE_ID_CORE_MAX_LENGTH);
-  if (!core) core = COURSE_ID_FALLBACK.slice(0, COURSE_ID_CORE_MAX_LENGTH);
-  let slug = `${core}${COURSE_SLUG_SEPARATOR}${suffix}`;
-  slug = trimUtf8ToBytes(slug, COURSE_ID_MAX_LENGTH);
-  if (!slug) slug = trimUtf8ToBytes(`${COURSE_ID_FALLBACK}${COURSE_SLUG_SEPARATOR}${suffix}`, COURSE_ID_MAX_LENGTH);
-  return slug || COURSE_ID_FALLBACK;
+  const core = normalizeCourseId(title, { maxBytes: COURSE_ID_CORE_MAX_LENGTH });
+  const slug = trimUtf8ToBytes(
+    `${core}${COURSE_SLUG_SEPARATOR}${suffix}`,
+    COURSE_ID_MAX_LENGTH
+  );
+  return slug;
 }
 function generateQuestionId() {
   return ("Q" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)).toUpperCase();
