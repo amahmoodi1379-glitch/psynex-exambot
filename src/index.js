@@ -1145,8 +1145,7 @@ export default {
             reply_markup: { inline_keyboard: keyboard },
           });
           if (!editResult?.ok) {
-            await tg.answerCallback(env, cq.id, "تغییر صفحه انجام نشد.", true);
-            return new Response("ok", { status: 200 });
+            throw new Error("Telegram editMessageText failed");
           }
 
           await tg.answerCallback(
