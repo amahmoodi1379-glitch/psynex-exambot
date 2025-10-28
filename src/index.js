@@ -123,6 +123,26 @@ const QUESTIONS_PREFIX = "questions";
 const COURSES_PAGE_SIZE = 8;
 const COURSES_KEYBOARD_COLUMNS = 2;
 const PERSIAN_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
+const TELEGRAM_CALLBACK_DATA_LIMIT = 64;
+const COURSE_CALLBACK_PREFIX = "c:";
+const COURSE_CALLBACK_SEPARATOR = ":";
+const ROOM_ID_MAX_LENGTH = 8; // shortId() => 6 chars timestamp + up to 2 chars randomness
+const HOST_SUFFIX_MAX_LENGTH = 19; // :host + encChatId (p + base36 up to 13 chars)
+const COURSE_ID_SUFFIX_LENGTH = 4;
+const COURSE_SLUG_SEPARATOR = "-";
+export const COURSE_ID_MAX_LENGTH = Math.max(
+  16,
+  TELEGRAM_CALLBACK_DATA_LIMIT -
+    COURSE_CALLBACK_PREFIX.length -
+    ROOM_ID_MAX_LENGTH -
+    COURSE_CALLBACK_SEPARATOR.length -
+    HOST_SUFFIX_MAX_LENGTH
+);
+const COURSE_ID_CORE_MAX_LENGTH = Math.max(
+  1,
+  COURSE_ID_MAX_LENGTH - COURSE_ID_SUFFIX_LENGTH - COURSE_SLUG_SEPARATOR.length
+);
+const COURSE_ID_FALLBACK = "course";
 
 async function getCourses(env) {
   try {
@@ -150,6 +170,15 @@ function toPersianDigits(value) {
   });
 }
 
+function assertCallbackWithinLimit(value, context) {
+  if (typeof value !== "string") return;
+  if (value.length > TELEGRAM_CALLBACK_DATA_LIMIT) {
+    throw new Error(
+      `${context} callback_data exceeds ${TELEGRAM_CALLBACK_DATA_LIMIT} bytes (${value.length})`
+    );
+  }
+}
+
 function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = COURSES_PAGE_SIZE }) {
   const safePageSize = Number.isInteger(pageSize) && pageSize > 0 ? pageSize : COURSES_PAGE_SIZE;
   const totalCourses = Array.isArray(courses) ? courses.length : 0;
@@ -162,8 +191,19 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
 
   const keyboard = [];
   let row = [];
+  const ridPart = String(rid ?? "");
+  const suffixPart = String(hostSuffix ?? "");
   for (const course of pageItems) {
-    row.push({ text: course.title, callback_data: `c:${rid}:${course.id}${hostSuffix}` });
+    const courseId = String(course?.id ?? "").trim();
+    if (!courseId) continue;
+    if (courseId.length > COURSE_ID_MAX_LENGTH) {
+      throw new Error(
+        `course id '${courseId}' exceeds ${COURSE_ID_MAX_LENGTH} characters`
+      );
+    }
+    const callback = `${COURSE_CALLBACK_PREFIX}${ridPart}${COURSE_CALLBACK_SEPARATOR}${courseId}${suffixPart}`;
+    assertCallbackWithinLimit(callback, `course ${courseId}`);
+    row.push({ text: course.title, callback_data: callback });
     if (row.length === COURSES_KEYBOARD_COLUMNS) {
       keyboard.push(row);
       row = [];
@@ -176,15 +216,19 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
     const nextTarget = currentPage < totalPages ? currentPage + 1 : null;
     const navRow = [];
     if (prevTarget) {
+      const callback = `clpage:${ridPart}:${prevTarget}${suffixPart}`;
+      assertCallbackWithinLimit(callback, `course list prev ${prevTarget}`);
       navRow.push({
         text: "⬅️ صفحه قبل",
-        callback_data: `clpage:${rid}:${prevTarget}${hostSuffix}`,
+        callback_data: callback,
       });
     }
     if (nextTarget) {
+      const callback = `clpage:${ridPart}:${nextTarget}${suffixPart}`;
+      assertCallbackWithinLimit(callback, `course list next ${nextTarget}`);
       navRow.push({
         text: "صفحه بعد ➡️",
-        callback_data: `clpage:${rid}:${nextTarget}${hostSuffix}`,
+        callback_data: callback,
       });
     }
     if (navRow.length) {
@@ -202,15 +246,33 @@ function buildCourseListMessage(currentPage, totalPages) {
   }
   return text;
 }
-function makeSlugFromTitle(title) {
+
+export { buildCoursePage };
+function generateCourseSuffix() {
+  let buffer = "";
+  while (buffer.length < COURSE_ID_SUFFIX_LENGTH) {
+    buffer += Math.random().toString(36).slice(2);
+  }
+  return buffer.slice(0, COURSE_ID_SUFFIX_LENGTH).toLowerCase();
+}
+
+export function makeSlugFromTitle(title) {
   const t = String(title || "").trim();
-  const base = t
+  const normalized = t
     .replace(/\s+/g, "-")
     .replace(/[^\p{L}\p{N}\-_]/gu, "") // اجازهٔ حروف و اعداد همه زبان‌ها + - _
+    .replace(/-+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "")
     .toLowerCase();
-  const core = base || "course";
-  const suffix = Math.random().toString(36).slice(2, 6);
-  return `${core}-${suffix}`;
+  const base = normalized || COURSE_ID_FALLBACK;
+  const suffix = generateCourseSuffix();
+  const maxCoreLength = COURSE_ID_CORE_MAX_LENGTH;
+  let core = base.slice(0, maxCoreLength);
+  if (!core) core = COURSE_ID_FALLBACK.slice(0, maxCoreLength);
+  if (!core) core = COURSE_ID_FALLBACK;
+  const slug = `${core}${COURSE_SLUG_SEPARATOR}${suffix}`;
+  return slug.length > COURSE_ID_MAX_LENGTH ? slug.slice(0, COURSE_ID_MAX_LENGTH) : slug;
 }
 function generateQuestionId() {
   return ("Q" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)).toUpperCase();
@@ -1374,8 +1436,20 @@ export default {
       const title = String((body.title||"").trim());
       if (!title)
         return new Response(JSON.stringify({ ok: false, error: "missing title" }), { status: 400, headers: { "content-type": "application/json; charset=utf-8" } });
-      const id = makeSlugFromTitle(title);
       const courses = await getCourses(env);
+      const existingIds = new Set(courses.map((c) => String(c.id || "")));
+      let id = "";
+      let attempts = 0;
+      do {
+        id = makeSlugFromTitle(title);
+        attempts += 1;
+      } while (existingIds.has(id) && attempts < 5);
+      if (!id)
+        return new Response(JSON.stringify({ ok: false, error: "invalid id" }), { status: 500, headers: { "content-type": "application/json; charset=utf-8" } });
+      if (id.length > COURSE_ID_MAX_LENGTH)
+        return new Response(JSON.stringify({ ok: false, error: "generated id too long" }), { status: 400, headers: { "content-type": "application/json; charset=utf-8" } });
+      if (existingIds.has(id))
+        return new Response(JSON.stringify({ ok: false, error: "could not create unique id" }), { status: 409, headers: { "content-type": "application/json; charset=utf-8" } });
       courses.push({ id, title });
       await saveCourses(env, courses);
       return new Response(JSON.stringify({ ok: true, courses }, null, 2), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
