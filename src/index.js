@@ -176,10 +176,16 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
     const nextTarget = currentPage < totalPages ? currentPage + 1 : null;
     const navRow = [];
     if (prevTarget) {
-      navRow.push({ text: "⬅️", callback_data: `clpage:${rid}:${prevTarget}${hostSuffix}` });
+      navRow.push({
+        text: "⬅️ صفحه قبل",
+        callback_data: `clpage:${rid}:${prevTarget}${hostSuffix}`,
+      });
     }
     if (nextTarget) {
-      navRow.push({ text: "➡️", callback_data: `clpage:${rid}:${nextTarget}${hostSuffix}` });
+      navRow.push({
+        text: "صفحه بعد ➡️",
+        callback_data: `clpage:${rid}:${nextTarget}${hostSuffix}`,
+      });
     }
     if (navRow.length) {
       keyboard.push(navRow);
@@ -1131,14 +1137,23 @@ export default {
           }
 
           const messageText = buildCourseListMessage(currentPage, totalPages);
-          await tg.call(env, "editMessageText", {
+          const editResult = await tg.call(env, "editMessageText", {
             chat_id,
             message_id: msg.message_id,
             text: messageText,
             parse_mode: "HTML",
             reply_markup: { inline_keyboard: keyboard },
           });
-          await tg.answerCallback(env, cq.id, `صفحه ${toPersianDigits(currentPage)} از ${toPersianDigits(totalPages)}`);
+          if (!editResult?.ok) {
+            await tg.answerCallback(env, cq.id, "تغییر صفحه انجام نشد.", true);
+            return new Response("ok", { status: 200 });
+          }
+
+          await tg.answerCallback(
+            env,
+            cq.id,
+            `صفحه ${toPersianDigits(currentPage)} از ${toPersianDigits(totalPages)}`
+          );
           return new Response("ok", { status: 200 });
         }
 
