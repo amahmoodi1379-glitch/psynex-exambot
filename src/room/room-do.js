@@ -1,7 +1,7 @@
 // RoomDO: منطق بازی داخل Durable Object
 
 import { ACTIVE_TEMPLATES, KNOWN_TEMPLATES, TEMPLATE_KEYS } from "../constants.js";
-import { encChatId } from "../utils.js";
+import { buildCallbackKey, registerCallbackPayload } from "../callback/token-service.js";
 
 const COURSES_KEY = "admin/courses.json";
 
@@ -37,6 +37,33 @@ export class RoomDO {
     this.env = env;
     this.storage = state.storage;
     this._advancing = false;
+    this._callbackStub = null;
+  }
+
+  getCallbackStub() {
+    if (!this._callbackStub) {
+      if (!this.env?.CALLBACKS || typeof this.env.CALLBACKS.idFromName !== "function") {
+        throw new Error("CALLBACKS Durable Object binding missing");
+      }
+      this._callbackStub = this.env.CALLBACKS.get(this.env.CALLBACKS.idFromName("global"));
+    }
+    return this._callbackStub;
+  }
+
+  async registerRoomCallback(data, { contextKey, payload, prefix = "rm" }) {
+    if (!data) throw new Error("data required for callback registration");
+    if (!contextKey) throw new Error("contextKey is required");
+    const tokens = (data.callbackTokens ||= {});
+    const existingToken = tokens[contextKey]?.token;
+    const { key, token } = buildCallbackKey(prefix, existingToken);
+    const enrichedPayload = {
+      ...payload,
+      rid: String(data.room_id || ""),
+      chatId: data.chat_id,
+    };
+    await registerCallbackPayload(this.getCallbackStub(), { key, payload: enrichedPayload });
+    tokens[contextKey] = { token, prefix, updatedAt: Date.now() };
+    return key;
   }
 
   // ====== Utilities ======
@@ -149,18 +176,7 @@ export class RoomDO {
     return MODE_LABELS[count] || `${count} سوالی`;
   }
 
-  hostSuffix(data) {
-    if (!data || data.chat_type !== "private") return "";
-    const encoded = encChatId(data.chat_id);
-    return encoded ? `:host${encoded}` : "";
-  }
-
-  withHost(data, base) {
-    const suffix = this.hostSuffix(data);
-    return suffix ? `${base}${suffix}` : base;
-  }
-
-  templateButton(data, templateKey) {
+  async templateButton(data, templateKey) {
     const rid = data?.room_id;
     const label = this.templateLabel(templateKey) || templateKey;
     const emoji =
@@ -168,15 +184,23 @@ export class RoomDO {
       templateKey === TEMPLATE_KEYS.TAALIFI ? "📝" :
       "🔀";
     if (!ACTIVE_TEMPLATES.has(templateKey)) {
+      const callback_data = await this.registerRoomCallback(data, {
+        contextKey: `setup:template-disabled:${templateKey}`,
+        payload: { type: "template-disabled", template: templateKey },
+      });
       return {
         text: `${emoji} ${label} 🚫`,
-        callback_data: this.withHost(data, `tdisabled:${rid}:${templateKey}`),
+        callback_data,
       };
     }
     const selected = data?.template === templateKey ? " ✅" : "";
+    const callback_data = await this.registerRoomCallback(data, {
+      contextKey: `setup:template:${templateKey}`,
+      payload: { type: "template-select", template: templateKey },
+    });
     return {
       text: `${emoji} ${label}${selected}`,
-      callback_data: this.withHost(data, `t:${rid}:${templateKey}`),
+      callback_data,
     };
   }
 
@@ -239,40 +263,66 @@ export class RoomDO {
     return lines;
   }
 
-  buildSetupKeyboard(data) {
-    if (!data || data.started || data.resultsPosted) return null;
-    const rid = data.room_id;
+  async buildSetupKeyboard(data) {
+    if (!data || data.started || data.resultsPosted) return { markup: null, spec: null };
     const rows = [];
+    const specRows = [];
 
     const courseSelected = Boolean(data.courseId);
-    rows.push([
-      {
-        text: courseSelected ? "📚 انتخاب درس ✅" : "📚 انتخاب درس",
-        callback_data: this.withHost(data, `cl:${rid}`),
-      },
-    ]);
+    const courseText = courseSelected ? "📚 انتخاب درس ✅" : "📚 انتخاب درس";
+    const courseCallback = await this.registerRoomCallback(data, {
+      contextKey: "setup:course-list",
+      payload: { type: "course-list" },
+    });
+    rows.push([{ text: courseText, callback_data: courseCallback }]);
+    specRows.push([{ text: courseText, action: "course-list" }]);
 
-    rows.push([this.templateButton(data, TEMPLATE_KEYS.KONKOORI)]);
-    rows.push([this.templateButton(data, TEMPLATE_KEYS.TAALIFI)]);
-    rows.push([this.templateButton(data, TEMPLATE_KEYS.MIX)]);
+    const konkooriButton = await this.templateButton(data, TEMPLATE_KEYS.KONKOORI);
+    const taalifiButton = await this.templateButton(data, TEMPLATE_KEYS.TAALIFI);
+    const mixButton = await this.templateButton(data, TEMPLATE_KEYS.MIX);
+    rows.push([konkooriButton]);
+    rows.push([taalifiButton]);
+    rows.push([mixButton]);
+    specRows.push([{ text: konkooriButton.text, action: "template", template: TEMPLATE_KEYS.KONKOORI }]);
+    specRows.push([{ text: taalifiButton.text, action: "template", template: TEMPLATE_KEYS.TAALIFI }]);
+    specRows.push([{ text: mixButton.text, action: "template", template: TEMPLATE_KEYS.MIX }]);
 
-    const modeRow = [5, 10].map((count) => {
+    const modeRow = [];
+    const modeSpecRow = [];
+    for (const count of [5, 10]) {
       const label = this.modeLabel(count);
       const selected = Number(data.modeCount) === count ? " ✅" : "";
       const prefix = count === 5 ? "5️⃣" : "🔟";
-      return {
-        text: `${prefix} ${label}${selected}`,
-        callback_data: this.withHost(data, `m:${rid}:${count}`),
-      };
-    });
+      const textLabel = `${prefix} ${label}${selected}`;
+      const callback_data = await this.registerRoomCallback(data, {
+        contextKey: `setup:mode:${count}`,
+        payload: { type: "mode-select", count },
+      });
+      modeRow.push({ text: textLabel, callback_data });
+      modeSpecRow.push({ text: textLabel, action: "mode-select", count });
+    }
     rows.push(modeRow);
+    specRows.push(modeSpecRow);
 
-    rows.push([
-      { text: "✨ آماده‌ام", callback_data: this.withHost(data, `j:${rid}`) },
-      { text: "🚀 آغاز بازی", callback_data: this.withHost(data, `s:${rid}`) },
+    const joinCallback = await this.registerRoomCallback(data, {
+      contextKey: "setup:join",
+      payload: { type: "join" },
+    });
+    const startCallback = await this.registerRoomCallback(data, {
+      contextKey: "setup:start",
+      payload: { type: "start" },
+    });
+    const actionRow = [
+      { text: "✨ آماده‌ام", callback_data: joinCallback },
+      { text: "🚀 آغاز بازی", callback_data: startCallback },
+    ];
+    rows.push(actionRow);
+    specRows.push([
+      { text: "✨ آماده‌ام", action: "join" },
+      { text: "🚀 آغاز بازی", action: "start" },
     ]);
 
-    return { inline_keyboard: rows };
+    return { markup: { inline_keyboard: rows }, spec: specRows };
   }
 
   buildSetupText(data) {
@@ -343,15 +393,15 @@ export class RoomDO {
     return lines.join("\n");
   }
 
-  buildSetupState(data) {
+  async buildSetupState(data) {
     const text = this.buildSetupText(data);
-    const markup = this.buildSetupKeyboard(data);
-    const hash = JSON.stringify({ text, markup: markup || null });
+    const { markup, spec } = await this.buildSetupKeyboard(data);
+    const hash = JSON.stringify({ text, spec: spec || null });
     return { text, markup, hash };
   }
 
   async saveAndRefresh(data, { forceUpdate = false } = {}) {
-    const state = this.buildSetupState(data);
+    const state = await this.buildSetupState(data);
     const shouldUpdate = forceUpdate || state.hash !== data.setupHash;
     data.setupHash = state.hash;
     await this.save(data);
@@ -413,7 +463,7 @@ export class RoomDO {
       setupHash: null,
     };
 
-    const state = this.buildSetupState(data);
+    const state = await this.buildSetupState(data);
     const extra = state.markup ? { reply_markup: state.markup } : {};
     const sent = await this.sendMessage(chat_id, state.text, extra);
     const messageId = sent?.result?.message_id || null;
@@ -582,13 +632,16 @@ export class RoomDO {
         `۴) ${q.options[3]}`
       ].join("\n");
 
-      const hostSuffix = this.hostSuffix(data);
-      const kb = { inline_keyboard: [[
-        { text:"۱", callback_data:`a:${data.room_id}:${data.currentIndex}:0${hostSuffix}` },
-        { text:"۲", callback_data:`a:${data.room_id}:${data.currentIndex}:1${hostSuffix}` },
-        { text:"۳", callback_data:`a:${data.room_id}:${data.currentIndex}:2${hostSuffix}` },
-        { text:"۴", callback_data:`a:${data.room_id}:${data.currentIndex}:3${hostSuffix}` },
-      ]]};
+      const optionRow = [];
+      for (let optIndex = 0; optIndex < 4; optIndex += 1) {
+        const label = `${optIndex + 1}`;
+        const callback_data = await this.registerRoomCallback(data, {
+          contextKey: `question:${data.currentIndex}:opt:${optIndex}`,
+          payload: { type: "answer", qIndex: data.currentIndex, option: optIndex },
+        });
+        optionRow.push({ text: label, callback_data });
+      }
+      const kb = { inline_keyboard: [optionRow] };
 
       const sent = await this.sendMessage(data.chat_id, text, { reply_markup: kb });
       const mid = sent?.result?.message_id || null;
@@ -651,8 +704,12 @@ export class RoomDO {
 
     lines.push("", "🔁 برای مرور گروهی از دکمهٔ زیر استفاده کنید.");
 
+    const groupReviewCallback = await this.registerRoomCallback(data, {
+      contextKey: "results:group-review",
+      payload: { type: "group-review" },
+    });
     const replyMarkup = {
-      inline_keyboard: [[{ text: "🧾 مرور گروهی", callback_data: this.withHost(data, `gr:${data.room_id}`) }]],
+      inline_keyboard: [[{ text: "🧾 مرور گروهی", callback_data: groupReviewCallback }]],
     };
 
     await this.sendMessage(data.chat_id, lines.join("\n"), { reply_markup: replyMarkup });
