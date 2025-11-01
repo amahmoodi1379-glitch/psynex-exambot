@@ -1,17 +1,53 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { webcrypto } from 'node:crypto';
 
 import { buildCoursePage, makeSlugFromTitle, COURSE_ID_MAX_LENGTH } from '../src/index.js';
+import { byteLen } from '../src/utils.js';
+
+if (!globalThis.crypto?.subtle) {
+  globalThis.crypto = webcrypto;
+}
 
 const TELEGRAM_CALLBACK_LIMIT = 64;
-const MAX_HOST_SUFFIX = ':hostp' + 'z'.repeat(13);
+
+class MemoryR2Object {
+  constructor(body) {
+    this.body = body;
+  }
+  async text() {
+    return this.body;
+  }
+  async json() {
+    return JSON.parse(this.body);
+  }
+}
+
+class MemoryR2Bucket {
+  constructor() {
+    this.store = new Map();
+  }
+  async head(key) {
+    return this.store.has(key) ? { key } : null;
+  }
+  async put(key, value) {
+    const body = typeof value === 'string' ? value : JSON.stringify(value);
+    this.store.set(key, body);
+    return { key };
+  }
+  async get(key) {
+    if (!this.store.has(key)) return null;
+    return new MemoryR2Object(this.store.get(key));
+  }
+}
 
 function createLongTitle(idx) {
   const base = 'Extremely lengthy course title for testing '.repeat(2);
   return `${base.trim()} ${idx}`;
 }
 
-test('buildCoursePage keeps callback_data within Telegram limit', () => {
+test('buildCoursePage keeps callback_data within Telegram limit', async () => {
+  const env = { QUESTIONS: new MemoryR2Bucket() };
   const courses = Array.from({ length: 9 }, (_, idx) => {
     const title = createLongTitle(idx + 1);
     const id = makeSlugFromTitle(title);
@@ -19,11 +55,11 @@ test('buildCoursePage keeps callback_data within Telegram limit', () => {
     return { id, title };
   });
 
-  const { keyboard } = buildCoursePage({
+  const { keyboard } = await buildCoursePage({
+    env,
     courses,
     page: 1,
     rid: 'abcdefgh',
-    hostSuffix: MAX_HOST_SUFFIX,
     pageSize: 8,
   });
 
@@ -32,7 +68,7 @@ test('buildCoursePage keeps callback_data within Telegram limit', () => {
   for (const row of keyboard) {
     for (const button of row) {
       if (!button?.callback_data) continue;
-      const byteLength = Buffer.byteLength(button.callback_data, 'utf8');
+      const byteLength = byteLen(button.callback_data);
       assert.ok(
         byteLength <= TELEGRAM_CALLBACK_LIMIT,
         `callback_data exceeded limit (${byteLength}): ${button.callback_data}`
@@ -41,36 +77,30 @@ test('buildCoursePage keeps callback_data within Telegram limit', () => {
   }
 });
 
-test('buildCoursePage enforces byte limit for Persian slugs with host suffix', () => {
+test('buildCoursePage creates deterministic idmap entries for long slugs', async () => {
+  const env = { QUESTIONS: new MemoryR2Bucket() };
   const title = 'عنوان بسیار بسیار طولانی برای آزمون با حروف فارسی';
   const id = makeSlugFromTitle(title);
   const rid = 'abcdefgh';
-  const hostSuffix = MAX_HOST_SUFFIX;
-  const callback = `c:${rid}:${id}${hostSuffix}`;
+  const { keyboard } = await buildCoursePage({
+    env,
+    courses: [{ id, title }],
+    page: 1,
+    rid,
+    pageSize: 1,
+  });
 
-  let threw = false;
-  try {
-    buildCoursePage({
-      courses: [{ id, title }],
-      page: 1,
-      rid,
-      hostSuffix,
-      pageSize: 1,
-    });
-  } catch (error) {
-    threw = true;
-    const byteLength = Buffer.byteLength(callback, 'utf8');
-    assert.ok(byteLength > TELEGRAM_CALLBACK_LIMIT, `expected setup to exceed ${TELEGRAM_CALLBACK_LIMIT} bytes (${byteLength})`);
-    assert.match(
-      error?.message || '',
-      /callback_data exceeds 64 bytes/,
-      'error message should report byte limit'
-    );
-    assert.ok(
-      error?.message?.includes(String(byteLength)),
-      'error message should include computed byte length'
-    );
-  }
-
-  assert.ok(threw, 'expected Persian slug with host suffix to exceed Telegram byte limit');
+  assert.ok(Array.isArray(keyboard) && keyboard.length === 1, 'single row expected');
+  const button = keyboard[0][0];
+  assert.ok(button?.callback_data, 'course button should have callback_data');
+  const parts = button.callback_data.split(':');
+  assert.equal(parts[0], 'c', 'callback prefix should remain c');
+  assert.equal(parts[1], rid, 'room id should be preserved');
+  const sid = parts[2];
+  assert.ok(sid && sid.length <= 16, 'short id should be compact');
+  const mapObject = await env.QUESTIONS.get(`idmap/${sid}.json`);
+  assert.ok(mapObject, 'idmap entry should be stored in memory bucket');
+  const parsed = await mapObject.json();
+  assert.equal(parsed.key, id, 'idmap should point to original course id');
+  assert.ok(byteLen(button.callback_data) <= TELEGRAM_CALLBACK_LIMIT, 'callback_data should respect Telegram limit');
 });

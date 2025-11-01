@@ -1,5 +1,13 @@
 import { tg } from "./bot/tg.js";
-import { getCommand, shortId, decChatId } from "./utils.js";
+import {
+  getCommand,
+  shortId,
+  byteLen,
+  shortIdFrom,
+  ensureIdMap,
+  resolveIdMap,
+  validateInlineKeyboard,
+} from "./utils.js";
 import {
   ACTIVE_TEMPLATES,
   ALLOWED_TEMPLATES,
@@ -127,7 +135,6 @@ const TELEGRAM_CALLBACK_DATA_LIMIT = 64;
 const COURSE_CALLBACK_PREFIX = "c:";
 const COURSE_CALLBACK_SEPARATOR = ":";
 const ROOM_ID_MAX_LENGTH = 8; // shortId() => 6 chars timestamp + up to 2 chars randomness
-const HOST_SUFFIX_MAX_LENGTH = 19; // :host + encChatId (p + base36 up to 13 chars)
 const COURSE_ID_SUFFIX_LENGTH = 4;
 const COURSE_SLUG_SEPARATOR = "-";
 export const COURSE_ID_MAX_LENGTH = Math.max(
@@ -135,8 +142,7 @@ export const COURSE_ID_MAX_LENGTH = Math.max(
   TELEGRAM_CALLBACK_DATA_LIMIT -
     COURSE_CALLBACK_PREFIX.length -
     ROOM_ID_MAX_LENGTH -
-    COURSE_CALLBACK_SEPARATOR.length -
-    HOST_SUFFIX_MAX_LENGTH
+    COURSE_CALLBACK_SEPARATOR.length
 );
 const COURSE_ID_CORE_MAX_LENGTH = Math.max(
   1,
@@ -170,20 +176,30 @@ function toPersianDigits(value) {
   });
 }
 
-function assertCallbackWithinLimit(value, context) {
+function assertCallbackWithinLimit(value, context, limit = TELEGRAM_CALLBACK_DATA_LIMIT) {
   if (typeof value !== "string") return;
-  const byteLength =
-    typeof TextEncoder === "function"
-      ? new TextEncoder().encode(value).length
-      : Buffer.byteLength(value, "utf8");
-  if (byteLength > TELEGRAM_CALLBACK_DATA_LIMIT) {
-    throw new Error(
-      `${context} callback_data exceeds ${TELEGRAM_CALLBACK_DATA_LIMIT} bytes (${byteLength})`
-    );
+  const length = byteLen(value);
+  if (length > limit) {
+    throw new Error(`${context} callback_data exceeds ${limit} bytes (${length})`);
   }
 }
 
-function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = COURSES_PAGE_SIZE }) {
+async function buildCourseButton({ env, course, rid }) {
+  const courseId = String(course?.id ?? "").trim();
+  if (!courseId) return null;
+  if (courseId.length > COURSE_ID_MAX_LENGTH) {
+    throw new Error(`course id '${courseId}' exceeds ${COURSE_ID_MAX_LENGTH} characters`);
+  }
+  const sid = await shortIdFrom(courseId, 6);
+  await ensureIdMap(env, sid, courseId);
+  const callback = `${COURSE_CALLBACK_PREFIX}${rid}${COURSE_CALLBACK_SEPARATOR}${sid}`;
+  assertCallbackWithinLimit(callback, `course ${courseId}`);
+  const title = String(course?.title ?? courseId) || courseId;
+  return { text: title, callback_data: callback };
+}
+
+export async function buildCoursePage({ env, courses, page = 1, rid, pageSize = COURSES_PAGE_SIZE }) {
+  if (!env) throw new Error("env is required to build course page");
   const safePageSize = Number.isInteger(pageSize) && pageSize > 0 ? pageSize : COURSES_PAGE_SIZE;
   const totalCourses = Array.isArray(courses) ? courses.length : 0;
   const totalPages = Math.max(1, Math.ceil(totalCourses / safePageSize));
@@ -196,18 +212,10 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
   const keyboard = [];
   let row = [];
   const ridPart = String(rid ?? "");
-  const suffixPart = String(hostSuffix ?? "");
   for (const course of pageItems) {
-    const courseId = String(course?.id ?? "").trim();
-    if (!courseId) continue;
-    if (courseId.length > COURSE_ID_MAX_LENGTH) {
-      throw new Error(
-        `course id '${courseId}' exceeds ${COURSE_ID_MAX_LENGTH} characters`
-      );
-    }
-    const callback = `${COURSE_CALLBACK_PREFIX}${ridPart}${COURSE_CALLBACK_SEPARATOR}${courseId}${suffixPart}`;
-    assertCallbackWithinLimit(callback, `course ${courseId}`);
-    row.push({ text: course.title, callback_data: callback });
+    const btn = await buildCourseButton({ env, course, rid: ridPart });
+    if (!btn) continue;
+    row.push(btn);
     if (row.length === COURSES_KEYBOARD_COLUMNS) {
       keyboard.push(row);
       row = [];
@@ -220,7 +228,7 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
     const nextTarget = currentPage < totalPages ? currentPage + 1 : null;
     const navRow = [];
     if (prevTarget) {
-      const callback = `clpage:${ridPart}:${prevTarget}${suffixPart}`;
+      const callback = `clpage:${ridPart}:${prevTarget}`;
       assertCallbackWithinLimit(callback, `course list prev ${prevTarget}`);
       navRow.push({
         text: "⬅️ صفحه قبل",
@@ -228,7 +236,7 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
       });
     }
     if (nextTarget) {
-      const callback = `clpage:${ridPart}:${nextTarget}${suffixPart}`;
+      const callback = `clpage:${ridPart}:${nextTarget}`;
       assertCallbackWithinLimit(callback, `course list next ${nextTarget}`);
       navRow.push({
         text: "صفحه بعد ➡️",
@@ -251,7 +259,19 @@ function buildCourseListMessage(currentPage, totalPages) {
   return text;
 }
 
-export { buildCoursePage };
+async function safeSendMessage(env, chatId, text, extra = {}) {
+  if (!chatId) return null;
+  try {
+    if (extra?.reply_markup) {
+      validateInlineKeyboard(extra.reply_markup);
+    }
+    return await tg.sendMessage(env, chatId, text, extra);
+  } catch (err) {
+    console.error("safeSendMessage failed", err);
+    return null;
+  }
+}
+
 function generateCourseSuffix() {
   let buffer = "";
   while (buffer.length < COURSE_ID_SUFFIX_LENGTH) {
@@ -994,6 +1014,7 @@ export default {
               },
             },
           ]);
+          validateInlineKeyboard({ inline_keyboard: inviteKeyboard });
           const welcomeText = `سلام 👋
 من ربات آزمون ساینکس هستم. می‌تونی آزمون‌های چندگزینه‌ای بسازی، دوستانت رو دعوت کنی و نتایج رو یکجا ببینی.
 
@@ -1085,18 +1106,7 @@ export default {
         const msg = cq.message || {};
         const chat_id = msg.chat?.id;
         const from = cq.from;
-        const parts = (cq.data || "").split(":"); // cl:<rid>[:host*] | clpage:<rid>:<page>[:host*] | c:<rid>:<courseId>[:host*] | ...
-        const hostMarker = parts.length ? parts[parts.length - 1] : null;
-        let hostChatId = chat_id;
-        let hostSuffix = "";
-        if (hostMarker && hostMarker.startsWith("host")) {
-          const decoded = decChatId(hostMarker.slice(4));
-          if (decoded !== null && decoded !== undefined && !Number.isNaN(decoded)) {
-            hostChatId = decoded;
-            parts.pop();
-            hostSuffix = `:${hostMarker}`;
-          }
-        }
+        const parts = (cq.data || "").split(":");
         const act = parts[0];
 
         if (act === "startpv") {
@@ -1117,6 +1127,11 @@ export default {
         }
 
         const rid = parts[1];
+        const hostChatId = chat_id;
+        if (!rid || hostChatId === null || hostChatId === undefined) {
+          await tg.answerCallback(env, cq.id, "پیام نامعتبر است. دوباره تلاش کنید.", true);
+          return new Response("ok", { status: 200 });
+        }
         const key = `${hostChatId}-${rid}`;
         const stub = env.ROOMS.get(env.ROOMS.idFromName(key));
 
@@ -1135,6 +1150,7 @@ export default {
 
         async function removeInlineKeyboard() {
           if (!chat_id || !msg.message_id) return;
+          validateInlineKeyboard({ inline_keyboard: [] });
           await tg.call(env, "editMessageReplyMarkup", {
             chat_id,
             message_id: msg.message_id,
@@ -1152,26 +1168,29 @@ export default {
           const ok = await ensureMemberOrNotify();
           if (!ok) return new Response("ok", { status: 200 });
 
+          const targetChatId = chat_id;
           const courses = await getCourses(env); // [{id,title}]
           if (!courses.length) {
             await tg.answerCallback(env, cq.id, "هیچ درسی تعریف نشده.", true);
             return new Response("ok", { status: 200 });
           }
-          const { keyboard, currentPage, totalPages } = buildCoursePage({
-            courses,
-            page: 1,
-            rid,
-            hostSuffix,
-          });
-          const messageText = buildCourseListMessage(currentPage, totalPages);
-          const targetChatId = hostChatId ?? chat_id;
           if (!targetChatId) {
             await tg.answerCallback(env, cq.id, "ارسال لیست ممکن نیست. چت نامشخص است.", true);
             return new Response("ok", { status: 200 });
           }
+
           try {
+            const { keyboard, currentPage, totalPages } = await buildCoursePage({
+              env,
+              courses,
+              page: 1,
+              rid,
+            });
+            const messageText = buildCourseListMessage(currentPage, totalPages);
+            const markup = { inline_keyboard: keyboard };
+            validateInlineKeyboard(markup);
             const sendResult = await tg.sendMessage(env, targetChatId, messageText, {
-              reply_markup: { inline_keyboard: keyboard },
+              reply_markup: markup,
             });
             if (!sendResult?.ok) {
               throw new Error("Telegram sendMessage failed");
@@ -1185,6 +1204,13 @@ export default {
               "ارسال لیست ممکن نشد. دوباره تلاش کنید.",
               true
             );
+            if (targetChatId) {
+              await safeSendMessage(
+                env,
+                targetChatId,
+                "⚠️ مشکلی در ساخت دکمه‌ها پیش آمد. لطفاً دوباره تلاش کنید."
+              );
+            }
           }
           return new Response("ok", { status: 200 });
         }
@@ -1194,46 +1220,54 @@ export default {
           if (!ok) return new Response("ok", { status: 200 });
 
           const requestedPage = parts[2];
+          const targetChatId = chat_id;
           const courses = await getCourses(env);
-          const targetChatId = hostChatId ?? chat_id;
           if (!courses.length) {
             await tg.answerCallback(env, cq.id, "هیچ درسی تعریف نشده.", true);
             if (targetChatId && msg.message_id) {
+              const emptyMarkup = { inline_keyboard: [] };
+              validateInlineKeyboard(emptyMarkup);
               await tg.call(env, "editMessageText", {
                 chat_id: targetChatId,
                 message_id: msg.message_id,
                 text: "هیچ درسی تعریف نشده.",
                 parse_mode: "HTML",
-                reply_markup: { inline_keyboard: [] },
+                reply_markup: emptyMarkup,
               });
             }
             return new Response("ok", { status: 200 });
           }
 
-          const { keyboard, currentPage, totalPages } = buildCoursePage({
-            courses,
-            page: requestedPage,
-            rid,
-            hostSuffix,
-          });
           if (!targetChatId || !msg.message_id) {
             await tg.answerCallback(env, cq.id, "پیام یافت نشد.", true);
             return new Response("ok", { status: 200 });
           }
 
-          const messageText = buildCourseListMessage(currentPage, totalPages);
-
           try {
+            const { keyboard, currentPage, totalPages } = await buildCoursePage({
+              env,
+              courses,
+              page: requestedPage,
+              rid,
+            });
+            const messageText = buildCourseListMessage(currentPage, totalPages);
+            const markup = { inline_keyboard: keyboard };
+            validateInlineKeyboard(markup);
             const editResult = await tg.call(env, "editMessageText", {
               chat_id: targetChatId,
               message_id: msg.message_id,
               text: messageText,
               parse_mode: "HTML",
-              reply_markup: { inline_keyboard: keyboard },
+              reply_markup: markup,
             });
             if (!editResult?.ok) {
               throw new Error("Telegram editMessageText failed");
             }
+            await tg.answerCallback(
+              env,
+              cq.id,
+              `صفحه ${toPersianDigits(currentPage)} از ${toPersianDigits(totalPages)}`
+            );
           } catch (err) {
             console.error("course list page edit error", err);
             await tg.answerCallback(
@@ -1242,14 +1276,16 @@ export default {
               "بروزرسانی صفحه ممکن نشد. دوباره تلاش کنید.",
               true
             );
+            if (targetChatId) {
+              await safeSendMessage(
+                env,
+                targetChatId,
+                "⚠️ مشکلی در ساخت دکمه‌ها پیش آمد. لطفاً دوباره تلاش کنید."
+              );
+            }
             return new Response("ok", { status: 200 });
           }
 
-          await tg.answerCallback(
-            env,
-            cq.id,
-            `صفحه ${toPersianDigits(currentPage)} از ${toPersianDigits(totalPages)}`
-          );
           return new Response("ok", { status: 200 });
         }
 
@@ -1258,7 +1294,38 @@ export default {
           const ok = await ensureMemberOrNotify();
           if (!ok) return new Response("ok", { status: 200 });
 
-          const courseId = parts[2];
+          const sid = parts[2];
+          if (!sid) {
+            await tg.answerCallback(env, cq.id, "درس یافت نشد. دوباره تلاش کنید.", true);
+            if (chat_id) {
+              await safeSendMessage(
+                env,
+                chat_id,
+                "⚠️ مشکلی در ساخت دکمه‌ها پیش آمد. لطفاً دوباره تلاش کنید."
+              );
+            }
+            return new Response("ok", { status: 200 });
+          }
+
+          let resolvedCourse = null;
+          try {
+            resolvedCourse = await resolveIdMap(env, sid);
+          } catch (err) {
+            console.error("resolve idmap error", sid, err);
+          }
+          const courseId = resolvedCourse?.key;
+          if (!courseId) {
+            await tg.answerCallback(env, cq.id, "درس یافت نشد. دوباره تلاش کنید.", true);
+            if (chat_id) {
+              await safeSendMessage(
+                env,
+                chat_id,
+                "⚠️ مشکلی در ساخت دکمه‌ها پیش آمد. لطفاً دوباره تلاش کنید."
+              );
+            }
+            return new Response("ok", { status: 200 });
+          }
+
           const r = await stub.fetch("https://do/course", {
             method: "POST",
             body: JSON.stringify({ by_user: from.id, courseId }),

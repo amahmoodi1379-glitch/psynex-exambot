@@ -1,7 +1,7 @@
 // RoomDO: منطق بازی داخل Durable Object
 
 import { ACTIVE_TEMPLATES, KNOWN_TEMPLATES, TEMPLATE_KEYS } from "../constants.js";
-import { encChatId } from "../utils.js";
+import { validateInlineKeyboard } from "../utils.js";
 
 const COURSES_KEY = "admin/courses.json";
 
@@ -54,18 +54,23 @@ export class RoomDO {
     return j;
   }
   sendMessage(chat_id, text, extra = {}) {
-    return this.tgCall("sendMessage", { chat_id, text, parse_mode:"HTML", ...extra });
+    const payload = { chat_id, text, parse_mode: "HTML", ...extra };
+    if (payload.reply_markup) validateInlineKeyboard(payload.reply_markup);
+    return this.tgCall("sendMessage", payload);
   }
   editMessageText(chat_id, message_id, text, extra = {}) {
-    return this.tgCall("editMessageText", {
+    const payload = {
       chat_id,
       message_id,
       text,
       parse_mode: "HTML",
       ...extra,
-    });
+    };
+    if (payload.reply_markup) validateInlineKeyboard(payload.reply_markup);
+    return this.tgCall("editMessageText", payload);
   }
   editMarkup(chat_id, message_id, reply_markup = null) {
+    if (reply_markup) validateInlineKeyboard(reply_markup);
     return this.tgCall("editMessageReplyMarkup", { chat_id, message_id, reply_markup });
   }
   // ====== R2: load questions ======
@@ -149,15 +154,12 @@ export class RoomDO {
     return MODE_LABELS[count] || `${count} سوالی`;
   }
 
-  hostSuffix(data) {
-    if (!data || data.chat_type !== "private") return "";
-    const encoded = encChatId(data.chat_id);
-    return encoded ? `:host${encoded}` : "";
+  hostSuffix() {
+    return "";
   }
 
-  withHost(data, base) {
-    const suffix = this.hostSuffix(data);
-    return suffix ? `${base}${suffix}` : base;
+  withHost(_data, base) {
+    return base;
   }
 
   templateButton(data, templateKey) {
