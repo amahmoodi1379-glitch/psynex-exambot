@@ -279,16 +279,34 @@ export { buildCoursePage };
 
 function trimToMaxBytes(value, maxBytes) {
   if (!maxBytes || maxBytes <= 0) return "";
-  let str = String(value ?? "");
+  const str = String(value ?? "");
   if (!str) return "";
   if (byteLength(str) <= maxBytes) return str;
-  let end = str.length;
-  while (end > 0) {
-    const candidate = str.slice(0, end);
-    if (byteLength(candidate) <= maxBytes) return candidate;
-    end--;
+
+  const chars = Array.from(str);
+  const prefixBytes = new Array(chars.length);
+  let total = 0;
+  for (let i = 0; i < chars.length; i++) {
+    total += byteLength(chars[i]);
+    prefixBytes[i] = total;
   }
-  return "";
+
+  let low = 0;
+  let high = chars.length;
+  let best = 0;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const used = mid === 0 ? 0 : prefixBytes[mid - 1];
+    if (used <= maxBytes) {
+      best = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  if (best <= 0) return "";
+  return chars.slice(0, best).join("");
 }
 
 function generateCourseSuffix() {
@@ -312,8 +330,8 @@ export function makeSlugFromTitle(title) {
   const suffix = generateCourseSuffix();
   const suffixPart = `${COURSE_SLUG_SEPARATOR}${suffix}`;
   const maxCoreBytes = Math.max(1, COURSE_ID_MAX_LENGTH - byteLength(suffixPart));
-  let core = trimToMaxBytes(base.slice(0, COURSE_ID_CORE_MAX_LENGTH), maxCoreBytes);
-  if (!core) core = trimToMaxBytes(COURSE_ID_FALLBACK.slice(0, COURSE_ID_CORE_MAX_LENGTH), maxCoreBytes);
+  const coreLimit = Math.max(1, Math.min(maxCoreBytes, COURSE_ID_CORE_MAX_LENGTH));
+  let core = trimToMaxBytes(base, coreLimit) || trimToMaxBytes(COURSE_ID_FALLBACK, coreLimit);
   if (!core) core = trimToMaxBytes(COURSE_ID_FALLBACK, maxCoreBytes);
   const slug = `${core}${suffixPart}`;
   return trimToMaxBytes(slug, COURSE_ID_MAX_LENGTH);
