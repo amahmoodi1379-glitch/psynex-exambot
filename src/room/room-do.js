@@ -152,7 +152,7 @@ export class RoomDO {
   hostSuffix(data) {
     if (!data || data.chat_type !== "private") return "";
     const encoded = encChatId(data.chat_id);
-    return encoded ? `:h${encoded}` : "";
+    return encoded ? `:host${encoded}` : "";
   }
 
   withHost(data, base) {
