@@ -172,13 +172,9 @@ function toPersianDigits(value) {
 
 function assertCallbackWithinLimit(value, context) {
   if (typeof value !== "string") return;
-  const byteLength =
-    typeof TextEncoder === "function"
-      ? new TextEncoder().encode(value).length
-      : Buffer.byteLength(value, "utf8");
-  if (byteLength > TELEGRAM_CALLBACK_DATA_LIMIT) {
+  if (value.length > TELEGRAM_CALLBACK_DATA_LIMIT) {
     throw new Error(
-      `${context} callback_data exceeds ${TELEGRAM_CALLBACK_DATA_LIMIT} bytes (${byteLength})`
+      `${context} callback_data exceeds ${TELEGRAM_CALLBACK_DATA_LIMIT} bytes (${value.length})`
     );
   }
 }
