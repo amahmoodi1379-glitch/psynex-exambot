@@ -1,5 +1,5 @@
 import { tg } from "./bot/tg.js";
-import { getCommand, shortId, decChatId } from "./utils.js";
+import { getCommand, shortId, decChatId, encChatId } from "./utils.js";
 import {
   ACTIVE_TEMPLATES,
   ALLOWED_TEMPLATES,
@@ -14,6 +14,9 @@ const TEMPLATE_TITLES = {
   [TEMPLATE_KEYS.TAALIFI]: "قالب تألیفی",
   [TEMPLATE_KEYS.MIX]: "قالب ترکیبی",
 };
+
+const textEncoder = new TextEncoder();
+const byteLength = (value) => textEncoder.encode(String(value ?? "")).length;
 
 // ==============================
 //   Helpers: کانال اجباری
@@ -127,20 +130,23 @@ const TELEGRAM_CALLBACK_DATA_LIMIT = 64;
 const COURSE_CALLBACK_PREFIX = "c:";
 const COURSE_CALLBACK_SEPARATOR = ":";
 const ROOM_ID_MAX_LENGTH = 8; // shortId() => 6 chars timestamp + up to 2 chars randomness
-const HOST_SUFFIX_MAX_LENGTH = 19; // :host + encChatId (p + base36 up to 13 chars)
+const COURSE_CALLBACK_PREFIX_BYTES = byteLength(COURSE_CALLBACK_PREFIX);
+const COURSE_CALLBACK_SEPARATOR_BYTES = byteLength(COURSE_CALLBACK_SEPARATOR);
+const ROOM_ID_MAX_LENGTH_BYTES = ROOM_ID_MAX_LENGTH; // shortId() => ASCII base36
+const HOST_SUFFIX_MAX_LENGTH = byteLength(`:hp${"z".repeat(13)}`); // :h + encChatId (p/n + base36 up to 13 chars)
 const COURSE_ID_SUFFIX_LENGTH = 4;
 const COURSE_SLUG_SEPARATOR = "-";
 export const COURSE_ID_MAX_LENGTH = Math.max(
   16,
   TELEGRAM_CALLBACK_DATA_LIMIT -
-    COURSE_CALLBACK_PREFIX.length -
-    ROOM_ID_MAX_LENGTH -
-    COURSE_CALLBACK_SEPARATOR.length -
+    COURSE_CALLBACK_PREFIX_BYTES -
+    ROOM_ID_MAX_LENGTH_BYTES -
+    COURSE_CALLBACK_SEPARATOR_BYTES -
     HOST_SUFFIX_MAX_LENGTH
 );
 const COURSE_ID_CORE_MAX_LENGTH = Math.max(
   1,
-  COURSE_ID_MAX_LENGTH - COURSE_ID_SUFFIX_LENGTH - COURSE_SLUG_SEPARATOR.length
+  COURSE_ID_MAX_LENGTH - COURSE_ID_SUFFIX_LENGTH - byteLength(COURSE_SLUG_SEPARATOR)
 );
 const COURSE_ID_FALLBACK = "course";
 
@@ -172,11 +178,32 @@ function toPersianDigits(value) {
 
 function assertCallbackWithinLimit(value, context) {
   if (typeof value !== "string") return;
-  if (value.length > TELEGRAM_CALLBACK_DATA_LIMIT) {
+  const length = byteLength(value);
+  if (length > TELEGRAM_CALLBACK_DATA_LIMIT) {
     throw new Error(
-      `${context} callback_data exceeds ${TELEGRAM_CALLBACK_DATA_LIMIT} bytes (${value.length})`
+      `${context} callback_data exceeds ${TELEGRAM_CALLBACK_DATA_LIMIT} bytes (${length})`
     );
   }
+}
+
+function encodeHostSuffix(chatId) {
+  if (chatId === null || chatId === undefined) return "";
+  if (Number.isNaN(chatId)) return "";
+  const encoded = encChatId(chatId);
+  return encoded ? `:h${encoded}` : "";
+}
+
+function parseHostMarker(marker) {
+  if (!marker || typeof marker !== "string") return null;
+  let encoded = null;
+  if (marker.startsWith("host")) encoded = marker.slice(4);
+  else if (/^h[pn][0-9a-z]+$/i.test(marker)) encoded = marker.slice(1);
+  if (!encoded) return null;
+  const decoded = decChatId(encoded);
+  if (decoded === null || decoded === undefined || Number.isNaN(decoded)) return null;
+  const suffix = encodeHostSuffix(decoded);
+  if (!suffix) return null;
+  return { chatId: decoded, suffix };
 }
 
 function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = COURSES_PAGE_SIZE }) {
@@ -196,9 +223,10 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
   for (const course of pageItems) {
     const courseId = String(course?.id ?? "").trim();
     if (!courseId) continue;
-    if (courseId.length > COURSE_ID_MAX_LENGTH) {
+    const courseIdBytes = byteLength(courseId);
+    if (courseIdBytes > COURSE_ID_MAX_LENGTH) {
       throw new Error(
-        `course id '${courseId}' exceeds ${COURSE_ID_MAX_LENGTH} characters`
+        `course id '${courseId}' exceeds ${COURSE_ID_MAX_LENGTH} bytes (${courseIdBytes})`
       );
     }
     const callback = `${COURSE_CALLBACK_PREFIX}${ridPart}${COURSE_CALLBACK_SEPARATOR}${courseId}${suffixPart}`;
@@ -248,6 +276,21 @@ function buildCourseListMessage(currentPage, totalPages) {
 }
 
 export { buildCoursePage };
+
+function trimToMaxBytes(value, maxBytes) {
+  if (!maxBytes || maxBytes <= 0) return "";
+  let str = String(value ?? "");
+  if (!str) return "";
+  if (byteLength(str) <= maxBytes) return str;
+  let end = str.length;
+  while (end > 0) {
+    const candidate = str.slice(0, end);
+    if (byteLength(candidate) <= maxBytes) return candidate;
+    end--;
+  }
+  return "";
+}
+
 function generateCourseSuffix() {
   let buffer = "";
   while (buffer.length < COURSE_ID_SUFFIX_LENGTH) {
@@ -267,12 +310,13 @@ export function makeSlugFromTitle(title) {
     .toLowerCase();
   const base = normalized || COURSE_ID_FALLBACK;
   const suffix = generateCourseSuffix();
-  const maxCoreLength = COURSE_ID_CORE_MAX_LENGTH;
-  let core = base.slice(0, maxCoreLength);
-  if (!core) core = COURSE_ID_FALLBACK.slice(0, maxCoreLength);
-  if (!core) core = COURSE_ID_FALLBACK;
-  const slug = `${core}${COURSE_SLUG_SEPARATOR}${suffix}`;
-  return slug.length > COURSE_ID_MAX_LENGTH ? slug.slice(0, COURSE_ID_MAX_LENGTH) : slug;
+  const suffixPart = `${COURSE_SLUG_SEPARATOR}${suffix}`;
+  const maxCoreBytes = Math.max(1, COURSE_ID_MAX_LENGTH - byteLength(suffixPart));
+  let core = trimToMaxBytes(base.slice(0, COURSE_ID_CORE_MAX_LENGTH), maxCoreBytes);
+  if (!core) core = trimToMaxBytes(COURSE_ID_FALLBACK.slice(0, COURSE_ID_CORE_MAX_LENGTH), maxCoreBytes);
+  if (!core) core = trimToMaxBytes(COURSE_ID_FALLBACK, maxCoreBytes);
+  const slug = `${core}${suffixPart}`;
+  return trimToMaxBytes(slug, COURSE_ID_MAX_LENGTH);
 }
 function generateQuestionId() {
   return ("Q" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)).toUpperCase();
@@ -1081,17 +1125,15 @@ export default {
         const msg = cq.message || {};
         const chat_id = msg.chat?.id;
         const from = cq.from;
-        const parts = (cq.data || "").split(":"); // cl:<rid>[:host*] | clpage:<rid>:<page>[:host*] | c:<rid>:<courseId>[:host*] | ...
+        const parts = (cq.data || "").split(":"); // cl:<rid>[:h*] | clpage:<rid>:<page>[:h*] | c:<rid>:<courseId>[:h*] | ...
         const hostMarker = parts.length ? parts[parts.length - 1] : null;
         let hostChatId = chat_id;
         let hostSuffix = "";
-        if (hostMarker && hostMarker.startsWith("host")) {
-          const decoded = decChatId(hostMarker.slice(4));
-          if (decoded !== null && decoded !== undefined && !Number.isNaN(decoded)) {
-            hostChatId = decoded;
-            parts.pop();
-            hostSuffix = `:${hostMarker}`;
-          }
+        const hostInfo = parseHostMarker(hostMarker);
+        if (hostInfo) {
+          hostChatId = hostInfo.chatId;
+          hostSuffix = hostInfo.suffix;
+          parts.pop();
         }
         const act = parts[0];
 
