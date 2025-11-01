@@ -4,14 +4,25 @@ import assert from 'node:assert/strict';
 import { buildCoursePage, makeSlugFromTitle, COURSE_ID_MAX_LENGTH } from '../src/index.js';
 
 const TELEGRAM_CALLBACK_LIMIT = 64;
-const MAX_HOST_SUFFIX = ':hostp' + 'z'.repeat(13);
 
 function createLongTitle(idx) {
   const base = 'Extremely lengthy course title for testing '.repeat(2);
   return `${base.trim()} ${idx}`;
 }
 
-test('buildCoursePage keeps callback_data within Telegram limit', () => {
+function createMockRegistrar() {
+  let counter = 0;
+  const assignments = [];
+  const registrar = async ({ prefix, payload, contextKey }) => {
+    const token = `token${counter++}`;
+    const callback_data = `${prefix}:${token}`;
+    assignments.push({ callback_data, payload, contextKey });
+    return callback_data;
+  };
+  return { registrar, assignments };
+}
+
+test('buildCoursePage keeps callback_data within Telegram limit', async () => {
   const courses = Array.from({ length: 9 }, (_, idx) => {
     const title = createLongTitle(idx + 1);
     const id = makeSlugFromTitle(title);
@@ -19,11 +30,14 @@ test('buildCoursePage keeps callback_data within Telegram limit', () => {
     return { id, title };
   });
 
-  const { keyboard } = buildCoursePage({
+  const { registrar, assignments } = createMockRegistrar();
+
+  const { keyboard } = await buildCoursePage({
     courses,
     page: 1,
     rid: 'abcdefgh',
-    hostSuffix: MAX_HOST_SUFFIX,
+    chatId: -100123,
+    tokenRegistrar: registrar,
     pageSize: 8,
   });
 
@@ -39,38 +53,33 @@ test('buildCoursePage keeps callback_data within Telegram limit', () => {
       );
     }
   }
+
+  assert.ok(assignments.length > 0, 'registrar should be called for each button');
+  const firstCourse = assignments.find((entry) => entry.payload?.type === 'course-select');
+  assert.ok(firstCourse, 'course-select payload should be registered');
+  assert.strictEqual(firstCourse.payload.rid, 'abcdefgh');
+  assert.strictEqual(firstCourse.payload.chatId, -100123);
 });
 
-test('buildCoursePage enforces byte limit for Persian slugs with host suffix', () => {
+test('buildCoursePage handles Persian slugs without exceeding callback limit', async () => {
   const title = 'عنوان بسیار بسیار طولانی برای آزمون با حروف فارسی';
   const id = makeSlugFromTitle(title);
   const rid = 'abcdefgh';
-  const hostSuffix = MAX_HOST_SUFFIX;
-  const callback = `c:${rid}:${id}${hostSuffix}`;
+  const { registrar, assignments } = createMockRegistrar();
 
-  let threw = false;
-  try {
-    buildCoursePage({
-      courses: [{ id, title }],
-      page: 1,
-      rid,
-      hostSuffix,
-      pageSize: 1,
-    });
-  } catch (error) {
-    threw = true;
-    const byteLength = Buffer.byteLength(callback, 'utf8');
-    assert.ok(byteLength > TELEGRAM_CALLBACK_LIMIT, `expected setup to exceed ${TELEGRAM_CALLBACK_LIMIT} bytes (${byteLength})`);
-    assert.match(
-      error?.message || '',
-      /callback_data exceeds 64 bytes/,
-      'error message should report byte limit'
-    );
-    assert.ok(
-      error?.message?.includes(String(byteLength)),
-      'error message should include computed byte length'
-    );
-  }
+  const { keyboard } = await buildCoursePage({
+    courses: [{ id, title }],
+    page: 1,
+    rid,
+    chatId: -42,
+    tokenRegistrar: registrar,
+    pageSize: 1,
+  });
 
-  assert.ok(threw, 'expected Persian slug with host suffix to exceed Telegram byte limit');
+  assert.ok(Array.isArray(keyboard) && keyboard.length === 1, 'keyboard should contain one row');
+  const button = keyboard[0][0];
+  assert.ok(button?.callback_data, 'button should include callback_data');
+  const byteLength = Buffer.byteLength(button.callback_data, 'utf8');
+  assert.ok(byteLength <= TELEGRAM_CALLBACK_LIMIT, 'callback_data should respect Telegram byte limit');
+  assert.ok(assignments.some((entry) => entry.payload?.type === 'course-select'));
 });

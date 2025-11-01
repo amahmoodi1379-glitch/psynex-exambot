@@ -1,5 +1,5 @@
 import { tg } from "./bot/tg.js";
-import { getCommand, shortId, decChatId } from "./utils.js";
+import { getCommand, shortId } from "./utils.js";
 import {
   ACTIVE_TEMPLATES,
   ALLOWED_TEMPLATES,
@@ -7,7 +7,14 @@ import {
   TEMPLATE_DISABLED_MESSAGE,
   TEMPLATE_KEYS,
 } from "./constants.js";
+import {
+  buildCallbackKey,
+  createCallbackStub,
+  registerCallbackPayload,
+  resolveCallbackPayload,
+} from "./callback/token-service.js";
 export { RoomDO } from "./room/room-do.js"; // Durable Object کلاس
+export { CallbackMapDO } from "./callback/callback-map-do.js";
 
 const TEMPLATE_TITLES = {
   [TEMPLATE_KEYS.KONKOORI]: "قالب کنکوری",
@@ -115,6 +122,404 @@ async function handleStartGameRequest({ env, msg, getStubByKey }) {
   return new Response("ok", { status: 200 });
 }
 
+function createTokenRegistrar(env, { cache } = {}) {
+  const stub = createCallbackStub(env);
+  const tokenCache = cache || null;
+  return async function register({ prefix, payload, contextKey }) {
+    const existingToken = contextKey && tokenCache ? tokenCache[contextKey]?.token : null;
+    const { key, token } = buildCallbackKey(prefix, existingToken);
+    await registerCallbackPayload(stub, { key, payload });
+    if (contextKey && tokenCache) {
+      tokenCache[contextKey] = { token };
+    }
+    return key;
+  };
+}
+
+async function handleCallbackQuery({ env, cq, getStubByKey }) {
+  const msg = cq.message || {};
+  const chat = msg.chat || {};
+  const chat_id = chat.id;
+  const chat_type = chat.type || "private";
+  const from = cq.from || {};
+  const rawData = String(cq.data || "").trim();
+  if (!rawData) {
+    await tg.answerCallback(env, cq.id, "دکمه نامعتبر است.", true);
+    return new Response("ok", { status: 200 });
+  }
+
+  let resolved;
+  try {
+    const stub = createCallbackStub(env);
+    resolved = await resolveCallbackPayload(stub, rawData);
+  } catch (err) {
+    console.error("callback resolve error", err);
+    await tg.answerCallback(env, cq.id, "خطا در پردازش دکمه.", true);
+    return new Response("ok", { status: 200 });
+  }
+
+  if (!resolved?.ok) {
+    await tg.answerCallback(env, cq.id, "⏱ این دکمه منقضی شده است. لطفاً دوباره امتحان کنید.", true);
+    return new Response("ok", { status: 200 });
+  }
+
+  const payload = resolved.payload || {};
+  const type = payload?.type;
+  const rid = payload?.rid;
+  const hostChatId = payload?.chatId ?? chat_id;
+  const roomKey = rid && hostChatId ? `${hostChatId}-${rid}` : null;
+  const stub = roomKey ? getStubByKey(roomKey) : null;
+
+  const ensureMemberOrNotify = async () => {
+    const chk = await mustBeMember(env, from.id);
+    if (chk.ok) return true;
+    if (chk.admin_issue) {
+      await tg.answerCallback(env, cq.id, "بات باید ادمین کانال باشد.", true);
+      if (chat_id)
+        await tg.sendMessage(env, chat_id, `بات را ادمین کانال کنید:\n${channelLink(env)}`);
+    } else {
+      await tg.answerCallback(env, cq.id, "برای شرکت باید عضو کانال باشید.", true);
+      if (chat_id)
+        await tg.sendMessage(env, chat_id, `ابتدا عضو کانال شوید:\n${channelLink(env)}`);
+    }
+    return false;
+  };
+
+  if (type === "action") {
+    if (payload.action === "startpv") {
+      const fakeMessage = {
+        chat: msg.chat,
+        message_id: msg.message_id,
+        from: cq.from,
+      };
+      try {
+        const result = await handleStartGameRequest({ env, msg: fakeMessage, getStubByKey });
+        await tg.answerCallback(env, cq.id, "🎮 درخواست شروع بازی ثبت شد.");
+        return result;
+      } catch (err) {
+        console.error("startpv error", err);
+        await tg.answerCallback(env, cq.id, "❌ شروع بازی ممکن نشد. دوباره تلاش کنید.", true);
+        return new Response("ok", { status: 200 });
+      }
+    }
+    await tg.answerCallback(env, cq.id, "دکمه نامعتبر است.", true);
+    return new Response("ok", { status: 200 });
+  }
+
+  if (type === "template-disabled") {
+    await tg.answerCallback(env, cq.id, TEMPLATE_DISABLED_MESSAGE, true);
+    return new Response("ok", { status: 200 });
+  }
+
+  if (!rid || !stub) {
+    await tg.answerCallback(env, cq.id, "اتاق پیدا نشد.", true);
+    return new Response("ok", { status: 200 });
+  }
+
+  if ([
+    "course-list",
+    "course-page",
+    "course-select",
+    "template-select",
+    "mode-select",
+    "join",
+    "start",
+    "answer",
+    "group-review",
+  ].includes(type)) {
+    const ok = await ensureMemberOrNotify();
+    if (!ok) return new Response("ok", { status: 200 });
+  }
+
+  if (type === "course-list") {
+    const courses = await getCourses(env);
+    if (!courses.length) {
+      await tg.answerCallback(env, cq.id, "هیچ درسی تعریف نشده.", true);
+      return new Response("ok", { status: 200 });
+    }
+    const registrar = createTokenRegistrar(env);
+    const { keyboard, currentPage, totalPages } = await buildCoursePage({
+      courses,
+      page: 1,
+      rid,
+      chatId: hostChatId,
+      tokenRegistrar: registrar,
+    });
+    const messageText = buildCourseListMessage(currentPage, totalPages);
+    const targetChatId = hostChatId ?? chat_id;
+    if (!targetChatId) {
+      await tg.answerCallback(env, cq.id, "ارسال لیست ممکن نیست. چت نامشخص است.", true);
+      return new Response("ok", { status: 200 });
+    }
+    try {
+      const sendResult = await tg.sendMessage(env, targetChatId, messageText, {
+        reply_markup: { inline_keyboard: keyboard },
+      });
+      if (!sendResult?.ok) {
+        throw new Error("Telegram sendMessage failed");
+      }
+      await tg.answerCallback(env, cq.id, "لیست درس‌ها");
+    } catch (err) {
+      console.error("course list send error", err);
+      await tg.answerCallback(env, cq.id, "ارسال لیست ممکن نشد. دوباره تلاش کنید.", true);
+    }
+    return new Response("ok", { status: 200 });
+  }
+
+  if (type === "course-page") {
+    const requestedPage = Number(payload?.page || 1);
+    const courses = await getCourses(env);
+    const targetChatId = hostChatId ?? chat_id;
+    if (!courses.length) {
+      await tg.answerCallback(env, cq.id, "هیچ درسی تعریف نشده.", true);
+      if (targetChatId && msg.message_id) {
+        await tg.call(env, "editMessageText", {
+          chat_id: targetChatId,
+          message_id: msg.message_id,
+          text: "هیچ درسی تعریف نشده.",
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: [] },
+        });
+      }
+      return new Response("ok", { status: 200 });
+    }
+
+    if (!targetChatId || !msg.message_id) {
+      await tg.answerCallback(env, cq.id, "پیام یافت نشد.", true);
+      return new Response("ok", { status: 200 });
+    }
+
+    const registrar = createTokenRegistrar(env);
+    const { keyboard, currentPage, totalPages } = await buildCoursePage({
+      courses,
+      page: requestedPage,
+      rid,
+      chatId: hostChatId,
+      tokenRegistrar: registrar,
+    });
+    const messageText = buildCourseListMessage(currentPage, totalPages);
+
+    try {
+      const editResult = await tg.call(env, "editMessageText", {
+        chat_id: targetChatId,
+        message_id: msg.message_id,
+        text: messageText,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: keyboard },
+      });
+      if (!editResult?.ok) {
+        throw new Error("Telegram editMessageText failed");
+      }
+      await tg.answerCallback(
+        env,
+        cq.id,
+        `صفحه ${toPersianDigits(currentPage)} از ${toPersianDigits(totalPages)}`
+      );
+    } catch (err) {
+      console.error("course list page edit error", err);
+      await tg.answerCallback(env, cq.id, "بروزرسانی صفحه ممکن نشد. دوباره تلاش کنید.", true);
+    }
+    return new Response("ok", { status: 200 });
+  }
+
+  if (type === "course-select") {
+    const courseId = payload?.courseId;
+    const r = await stub.fetch("https://do/course", {
+      method: "POST",
+      body: JSON.stringify({ by_user: from.id, courseId }),
+    });
+    const out = await r.json();
+    if (!out.ok) {
+      await tg.answerCallback(
+        env,
+        cq.id,
+        out.error === "only-starter"
+          ? "فقط شروع‌کننده می‌تواند درس را تعیین کند."
+          : out.error === "already-started"
+          ? "بازی آغاز شده."
+          : "خطا",
+        true
+      );
+      return new Response("ok", { status: 200 });
+    }
+    const courseLabel = out.courseTitle || out.courseId;
+    await tg.answerCallback(env, cq.id, `درس «${courseLabel}» تنظیم شد ✅`);
+    return new Response("ok", { status: 200 });
+  }
+
+  if (type === "template-select") {
+    const tpl = payload?.template;
+    if (!tpl || !KNOWN_TEMPLATES.has(tpl)) {
+      await tg.answerCallback(env, cq.id, "خطا", true);
+      return new Response("ok", { status: 200 });
+    }
+    if (!ACTIVE_TEMPLATES.has(tpl)) {
+      await tg.answerCallback(env, cq.id, TEMPLATE_DISABLED_MESSAGE, true);
+      return new Response("ok", { status: 200 });
+    }
+
+    const r = await stub.fetch("https://do/template", {
+      method: "POST",
+      body: JSON.stringify({ by_user: from.id, template: tpl }),
+    });
+    const out = await r.json();
+    if (!out.ok) {
+      await tg.answerCallback(
+        env,
+        cq.id,
+        out.error === "only-starter"
+          ? "فقط شروع‌کننده می‌تواند قالب را تعیین کند."
+          : out.error === "already-started"
+          ? "بازی آغاز شده."
+          : out.error === "template-disabled"
+          ? TEMPLATE_DISABLED_MESSAGE
+          : "خطا",
+        true
+      );
+      return new Response("ok", { status: 200 });
+    }
+    const templateLabel = TEMPLATE_TITLES[out.template] || out.template;
+    await tg.answerCallback(env, cq.id, `قالب «${templateLabel}» تنظیم شد ✅`);
+    return new Response("ok", { status: 200 });
+  }
+
+  if (type === "mode-select") {
+    const count = Number(payload?.count || 0);
+    const r = await stub.fetch("https://do/mode", {
+      method: "POST",
+      body: JSON.stringify({ by_user: from.id, count }),
+    });
+    const out = await r.json();
+    if (!out.ok) {
+      await tg.answerCallback(
+        env,
+        cq.id,
+        out.error === "only-starter"
+          ? "فقط شروع‌کننده می‌تواند حالت را انتخاب کند."
+          : out.error === "invalid-mode"
+          ? "حالت نامعتبر است."
+          : out.error === "already-started"
+          ? "بازی شروع شده."
+          : "خطا",
+        true
+      );
+      return new Response("ok", { status: 200 });
+    }
+    const modeLabel =
+      out.modeCount === 5
+        ? "۵ سوالی"
+        : out.modeCount === 10
+        ? "۱۰ سوالی"
+        : `${out.modeCount} سوالی`;
+    await tg.answerCallback(env, cq.id, `حالت ${modeLabel} تنظیم شد ✅`);
+    return new Response("ok", { status: 200 });
+  }
+
+  if (type === "join") {
+    const r = await stub.fetch("https://do/join", {
+      method: "POST",
+      body: JSON.stringify({ user_id: from.id, name: from.first_name }),
+    });
+    const out = await r.json();
+    if (!out.ok) {
+      const msgText =
+        out.error === "already-started"
+          ? "بازی شروع شده است."
+          : out.error === "no-room"
+          ? "اتاق پیدا نشد."
+          : "خطا در ثبت آمادگی.";
+      await tg.answerCallback(env, cq.id, msgText, true);
+      return new Response("ok", { status: 200 });
+    }
+    const statusText = out.alreadyReady ? "قبلاً آماده بودی ✨" : "آماده شدی ✅";
+    await tg.answerCallback(env, cq.id, `${statusText} • آماده‌ها: ${out.readyCount}`);
+    return new Response("ok", { status: 200 });
+  }
+
+  if (type === "start") {
+    const r = await stub.fetch("https://do/start", {
+      method: "POST",
+      body: JSON.stringify({ by_user: from.id }),
+    });
+    const out = await r.json();
+    if (!out.ok) {
+      await tg.answerCallback(
+        env,
+        cq.id,
+        out.error === "only-starter"
+          ? "فقط شروع‌کننده می‌تواند آغاز کند."
+          : out.error === "already-started"
+          ? "بازی قبلاً شروع شده."
+          : out.error === "mode-not-set"
+          ? "اول حالت (۵ یا ۱۰ سؤال) را انتخاب کنید."
+          : out.error === "course-not-set"
+          ? "اول درس را انتخاب کنید."
+          : out.error === "template-not-set"
+          ? "قالب را انتخاب کنید."
+          : out.error === "no-participants"
+          ? "هیچ شرکت‌کننده‌ای آماده نیست."
+          : out.error === "no-questions"
+          ? "بانک سؤال کافی نیست."
+          : "خطا",
+        true
+      );
+      return new Response("ok", { status: 200 });
+    }
+    await tg.answerCallback(env, cq.id, "🚀 بازی آغا شد!");
+    return new Response("ok", { status: 200 });
+  }
+
+  if (type === "answer") {
+    const qIndex = Number(payload?.qIndex);
+    const option = Number(payload?.option);
+    const r = await stub.fetch("https://do/answer", {
+      method: "POST",
+      body: JSON.stringify({ user_id: from.id, qIndex, option }),
+    });
+    const out = await r.json();
+    if (out.ok && out.duplicate) await tg.answerCallback(env, cq.id, "قبلاً ثبت شده بود.");
+    else if (out.ok) await tg.answerCallback(env, cq.id, "پاسخ ثبت شد ✅");
+    else await tg.answerCallback(env, cq.id, "زمان یا حالت نامعتبر", true);
+    return new Response("ok", { status: 200 });
+  }
+
+  if (type === "group-review") {
+    const r = await stub.fetch("https://do/group-review", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    const out = await r.json();
+    if (!out.ok) {
+      const errorMessages = {
+        "not-ended": "بازی هنوز تمام نشده است.",
+        "no-room": "اتاق پیدا نشد.",
+        "no-questions": "سؤالی برای نمایش وجود ندارد.",
+      };
+      const msgText = errorMessages[out.error] || "خطا در دریافت مرور گروهی.";
+      await tg.answerCallback(env, cq.id, msgText, true);
+      if (chat_id) await tg.sendMessage(env, chat_id, `⚠️ ${msgText}`);
+      return new Response("ok", { status: 200 });
+    }
+    await tg.answerCallback(env, cq.id, "ارسال شد ✅");
+    if (chat_id) await tg.sendMessage(env, chat_id, out.text);
+    try {
+      if (chat_id && msg.message_id) {
+        await tg.call(env, "editMessageReplyMarkup", {
+          chat_id,
+          message_id: msg.message_id,
+          reply_markup: { inline_keyboard: [] },
+        });
+      }
+    } catch (err) {
+      console.error("remove inline keyboard error", err);
+    }
+    return new Response("ok", { status: 200 });
+  }
+
+  await tg.answerCallback(env, cq.id, "دکمه نامعتبر است.", true);
+  return new Response("ok", { status: 200 });
+}
+
 // ==============================
 //   R2: دوره‌ها و سؤال‌ها (ادمین)
 // ==============================
@@ -123,21 +528,10 @@ const QUESTIONS_PREFIX = "questions";
 const COURSES_PAGE_SIZE = 8;
 const COURSES_KEYBOARD_COLUMNS = 2;
 const PERSIAN_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
-const TELEGRAM_CALLBACK_DATA_LIMIT = 64;
-const COURSE_CALLBACK_PREFIX = "c:";
-const COURSE_CALLBACK_SEPARATOR = ":";
-const ROOM_ID_MAX_LENGTH = 8; // shortId() => 6 chars timestamp + up to 2 chars randomness
-const HOST_SUFFIX_MAX_LENGTH = 19; // :host + encChatId (p + base36 up to 13 chars)
+const COURSE_ID_MAX_LENGTH_BASE = 34; // legacy constraint to keep slugs compact
 const COURSE_ID_SUFFIX_LENGTH = 4;
 const COURSE_SLUG_SEPARATOR = "-";
-export const COURSE_ID_MAX_LENGTH = Math.max(
-  16,
-  TELEGRAM_CALLBACK_DATA_LIMIT -
-    COURSE_CALLBACK_PREFIX.length -
-    ROOM_ID_MAX_LENGTH -
-    COURSE_CALLBACK_SEPARATOR.length -
-    HOST_SUFFIX_MAX_LENGTH
-);
+export const COURSE_ID_MAX_LENGTH = COURSE_ID_MAX_LENGTH_BASE;
 const COURSE_ID_CORE_MAX_LENGTH = Math.max(
   1,
   COURSE_ID_MAX_LENGTH - COURSE_ID_SUFFIX_LENGTH - COURSE_SLUG_SEPARATOR.length
@@ -170,20 +564,17 @@ function toPersianDigits(value) {
   });
 }
 
-function assertCallbackWithinLimit(value, context) {
-  if (typeof value !== "string") return;
-  const byteLength =
-    typeof TextEncoder === "function"
-      ? new TextEncoder().encode(value).length
-      : Buffer.byteLength(value, "utf8");
-  if (byteLength > TELEGRAM_CALLBACK_DATA_LIMIT) {
-    throw new Error(
-      `${context} callback_data exceeds ${TELEGRAM_CALLBACK_DATA_LIMIT} bytes (${byteLength})`
-    );
+async function buildCoursePage({
+  courses,
+  page = 1,
+  rid,
+  chatId,
+  tokenRegistrar,
+  pageSize = COURSES_PAGE_SIZE,
+}) {
+  if (typeof tokenRegistrar !== "function") {
+    throw new Error("tokenRegistrar is required to build course keyboard");
   }
-}
-
-function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = COURSES_PAGE_SIZE }) {
   const safePageSize = Number.isInteger(pageSize) && pageSize > 0 ? pageSize : COURSES_PAGE_SIZE;
   const totalCourses = Array.isArray(courses) ? courses.length : 0;
   const totalPages = Math.max(1, Math.ceil(totalCourses / safePageSize));
@@ -196,18 +587,26 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
   const keyboard = [];
   let row = [];
   const ridPart = String(rid ?? "");
-  const suffixPart = String(hostSuffix ?? "");
+  const chatKey = chatId ?? null;
+
   for (const course of pageItems) {
     const courseId = String(course?.id ?? "").trim();
     if (!courseId) continue;
     if (courseId.length > COURSE_ID_MAX_LENGTH) {
-      throw new Error(
-        `course id '${courseId}' exceeds ${COURSE_ID_MAX_LENGTH} characters`
-      );
+      throw new Error(`course id '${courseId}' exceeds ${COURSE_ID_MAX_LENGTH} characters`);
     }
-    const callback = `${COURSE_CALLBACK_PREFIX}${ridPart}${COURSE_CALLBACK_SEPARATOR}${courseId}${suffixPart}`;
-    assertCallbackWithinLimit(callback, `course ${courseId}`);
-    row.push({ text: course.title, callback_data: callback });
+    const payload = {
+      type: "course-select",
+      rid: ridPart,
+      courseId,
+      chatId: chatKey,
+    };
+    const callbackData = await tokenRegistrar({
+      prefix: "crs",
+      payload,
+      contextKey: `course:${ridPart}:${courseId}`,
+    });
+    row.push({ text: course.title, callback_data: callbackData });
     if (row.length === COURSES_KEYBOARD_COLUMNS) {
       keyboard.push(row);
       row = [];
@@ -220,19 +619,27 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
     const nextTarget = currentPage < totalPages ? currentPage + 1 : null;
     const navRow = [];
     if (prevTarget) {
-      const callback = `clpage:${ridPart}:${prevTarget}${suffixPart}`;
-      assertCallbackWithinLimit(callback, `course list prev ${prevTarget}`);
+      const payload = { type: "course-page", rid: ridPart, page: prevTarget, chatId: chatKey };
+      const callbackData = await tokenRegistrar({
+        prefix: "crs",
+        payload,
+        contextKey: `course-page:${ridPart}:${prevTarget}`,
+      });
       navRow.push({
         text: "⬅️ صفحه قبل",
-        callback_data: callback,
+        callback_data: callbackData,
       });
     }
     if (nextTarget) {
-      const callback = `clpage:${ridPart}:${nextTarget}${suffixPart}`;
-      assertCallbackWithinLimit(callback, `course list next ${nextTarget}`);
+      const payload = { type: "course-page", rid: ridPart, page: nextTarget, chatId: chatKey };
+      const callbackData = await tokenRegistrar({
+        prefix: "crs",
+        payload,
+        contextKey: `course-page:${ridPart}:${nextTarget}`,
+      });
       navRow.push({
         text: "صفحه بعد ➡️",
-        callback_data: callback,
+        callback_data: callbackData,
       });
     }
     if (navRow.length) {
@@ -966,11 +1373,18 @@ export default {
             return handleStartGameRequest({ env, msg, getStubByKey });
           }
           const botUsername = (env.BOT_USERNAME || "").replace(/^@/, "");
+          const registrar = createTokenRegistrar(env);
+          const startCallback = await registrar({
+            prefix: "act",
+            payload: { type: "action", action: "startpv", chatId: chat_id },
+            contextKey: `startpv:${chat_id}`,
+          });
+
           const inviteKeyboard = [
             [
               {
                 text: "🎮 شروع بازی",
-                callback_data: "startpv",
+                callback_data: startCallback,
               },
             ],
           ];
@@ -1081,342 +1495,14 @@ export default {
 
       // دکمه‌های اینلاین
       if (update.callback_query) {
-        const cq = update.callback_query;
-        const msg = cq.message || {};
-        const chat_id = msg.chat?.id;
-        const from = cq.from;
-        const parts = (cq.data || "").split(":"); // cl:<rid>[:host*] | clpage:<rid>:<page>[:host*] | c:<rid>:<courseId>[:host*] | ...
-        const hostMarker = parts.length ? parts[parts.length - 1] : null;
-        let hostChatId = chat_id;
-        let hostSuffix = "";
-        if (hostMarker && hostMarker.startsWith("host")) {
-          const decoded = decChatId(hostMarker.slice(4));
-          if (decoded !== null && decoded !== undefined && !Number.isNaN(decoded)) {
-            hostChatId = decoded;
-            parts.pop();
-            hostSuffix = `:${hostMarker}`;
+        try {
+          return await handleCallbackQuery({ env, cq: update.callback_query, getStubByKey });
+        } catch (err) {
+          console.error("callback handler error", err);
+          const cq = update.callback_query;
+          if (cq?.id) {
+            await tg.answerCallback(env, cq.id, "خطا رخ داد. دوباره تلاش کنید.", true);
           }
-        }
-        const act = parts[0];
-
-        if (act === "startpv") {
-          const fakeMessage = {
-            chat: msg.chat,
-            message_id: msg.message_id,
-            from: cq.from,
-          };
-          try {
-            const result = await handleStartGameRequest({ env, msg: fakeMessage, getStubByKey });
-            await tg.answerCallback(env, cq.id, "🎮 درخواست شروع بازی ثبت شد.");
-            return result;
-          } catch (err) {
-            await tg.answerCallback(env, cq.id, "❌ شروع بازی ممکن نشد. دوباره تلاش کنید.", true);
-            console.error("startpv error", err);
-            return new Response("ok", { status: 200 });
-          }
-        }
-
-        const rid = parts[1];
-        const key = `${hostChatId}-${rid}`;
-        const stub = env.ROOMS.get(env.ROOMS.idFromName(key));
-
-        async function ensureMemberOrNotify() {
-          const chk = await mustBeMember(env, from.id);
-          if (chk.ok) return true;
-          if (chk.admin_issue) {
-            await tg.answerCallback(env, cq.id, "بات باید ادمین کانال باشد.", true);
-            await tg.sendMessage(env, chat_id, `بات را ادمین کانال کنید:\n${channelLink(env)}`);
-          } else {
-            await tg.answerCallback(env, cq.id, "برای شرکت باید عضو کانال باشید.", true);
-            await tg.sendMessage(env, chat_id, `ابتدا عضو کانال شوید:\n${channelLink(env)}`);
-          }
-          return false;
-        }
-
-        async function removeInlineKeyboard() {
-          if (!chat_id || !msg.message_id) return;
-          await tg.call(env, "editMessageReplyMarkup", {
-            chat_id,
-            message_id: msg.message_id,
-            reply_markup: { inline_keyboard: [] },
-          });
-        }
-
-        if (act === "tdisabled") {
-          await tg.answerCallback(env, cq.id, TEMPLATE_DISABLED_MESSAGE, true);
-          return new Response("ok", { status: 200 });
-        }
-
-        // لیست دروس
-        if (act === "cl") {
-          const ok = await ensureMemberOrNotify();
-          if (!ok) return new Response("ok", { status: 200 });
-
-          const courses = await getCourses(env); // [{id,title}]
-          if (!courses.length) {
-            await tg.answerCallback(env, cq.id, "هیچ درسی تعریف نشده.", true);
-            return new Response("ok", { status: 200 });
-          }
-          const { keyboard, currentPage, totalPages } = buildCoursePage({
-            courses,
-            page: 1,
-            rid,
-            hostSuffix,
-          });
-          const messageText = buildCourseListMessage(currentPage, totalPages);
-          const targetChatId = hostChatId ?? chat_id;
-          if (!targetChatId) {
-            await tg.answerCallback(env, cq.id, "ارسال لیست ممکن نیست. چت نامشخص است.", true);
-            return new Response("ok", { status: 200 });
-          }
-          try {
-            const sendResult = await tg.sendMessage(env, targetChatId, messageText, {
-              reply_markup: { inline_keyboard: keyboard },
-            });
-            if (!sendResult?.ok) {
-              throw new Error("Telegram sendMessage failed");
-            }
-            await tg.answerCallback(env, cq.id, "لیست درس‌ها");
-          } catch (err) {
-            console.error("course list send error", err);
-            await tg.answerCallback(
-              env,
-              cq.id,
-              "ارسال لیست ممکن نشد. دوباره تلاش کنید.",
-              true
-            );
-          }
-          return new Response("ok", { status: 200 });
-        }
-
-        if (act === "clpage") {
-          const ok = await ensureMemberOrNotify();
-          if (!ok) return new Response("ok", { status: 200 });
-
-          const requestedPage = parts[2];
-          const courses = await getCourses(env);
-          const targetChatId = hostChatId ?? chat_id;
-          if (!courses.length) {
-            await tg.answerCallback(env, cq.id, "هیچ درسی تعریف نشده.", true);
-            if (targetChatId && msg.message_id) {
-              await tg.call(env, "editMessageText", {
-                chat_id: targetChatId,
-                message_id: msg.message_id,
-                text: "هیچ درسی تعریف نشده.",
-                parse_mode: "HTML",
-                reply_markup: { inline_keyboard: [] },
-              });
-            }
-            return new Response("ok", { status: 200 });
-          }
-
-          const { keyboard, currentPage, totalPages } = buildCoursePage({
-            courses,
-            page: requestedPage,
-            rid,
-            hostSuffix,
-          });
-          if (!targetChatId || !msg.message_id) {
-            await tg.answerCallback(env, cq.id, "پیام یافت نشد.", true);
-            return new Response("ok", { status: 200 });
-          }
-
-          const messageText = buildCourseListMessage(currentPage, totalPages);
-
-          try {
-            const editResult = await tg.call(env, "editMessageText", {
-              chat_id: targetChatId,
-              message_id: msg.message_id,
-              text: messageText,
-              parse_mode: "HTML",
-              reply_markup: { inline_keyboard: keyboard },
-            });
-            if (!editResult?.ok) {
-              throw new Error("Telegram editMessageText failed");
-            }
-          } catch (err) {
-            console.error("course list page edit error", err);
-            await tg.answerCallback(
-              env,
-              cq.id,
-              "بروزرسانی صفحه ممکن نشد. دوباره تلاش کنید.",
-              true
-            );
-            return new Response("ok", { status: 200 });
-          }
-
-          await tg.answerCallback(
-            env,
-            cq.id,
-            `صفحه ${toPersianDigits(currentPage)} از ${toPersianDigits(totalPages)}`
-          );
-          return new Response("ok", { status: 200 });
-        }
-
-        // انتخاب درس
-        if (act === "c") {
-          const ok = await ensureMemberOrNotify();
-          if (!ok) return new Response("ok", { status: 200 });
-
-          const courseId = parts[2];
-          const r = await stub.fetch("https://do/course", {
-            method: "POST",
-            body: JSON.stringify({ by_user: from.id, courseId }),
-          });
-          const out = await r.json();
-          if (!out.ok) {
-            await tg.answerCallback(env, cq.id,
-              out.error === "only-starter" ? "فقط شروع‌کننده می‌تواند درس را تعیین کند." :
-              out.error === "already-started" ? "بازی آغاز شده." : "خطا", true);
-            return new Response("ok", { status: 200 });
-          }
-          const courseLabel = out.courseTitle || out.courseId;
-          await tg.answerCallback(env, cq.id, `درس «${courseLabel}» تنظیم شد ✅`);
-          return new Response("ok", { status: 200 });
-        }
-
-        // انتخاب قالب
-        if (act === "t") {
-          const tpl = parts[2];
-          if (!tpl || !KNOWN_TEMPLATES.has(tpl)) {
-            await tg.answerCallback(env, cq.id, "خطا", true);
-            return new Response("ok", { status: 200 });
-          }
-          if (!ACTIVE_TEMPLATES.has(tpl)) {
-            await tg.answerCallback(env, cq.id, TEMPLATE_DISABLED_MESSAGE, true);
-            return new Response("ok", { status: 200 });
-          }
-
-          const ok = await ensureMemberOrNotify();
-          if (!ok) return new Response("ok", { status: 200 });
-
-          const r = await stub.fetch("https://do/template", {
-            method: "POST",
-            body: JSON.stringify({ by_user: from.id, template: tpl }),
-          });
-          const out = await r.json();
-          if (!out.ok) {
-            await tg.answerCallback(env, cq.id,
-              out.error === "only-starter" ? "فقط شروع‌کننده می‌تواند قالب را تعیین کند." :
-              out.error === "already-started" ? "بازی آغاز شده." :
-              out.error === "template-disabled" ? TEMPLATE_DISABLED_MESSAGE :
-              "خطا", true);
-            return new Response("ok", { status: 200 });
-          }
-          const templateLabel = TEMPLATE_TITLES[out.template] || out.template;
-          await tg.answerCallback(env, cq.id, `قالب «${templateLabel}» تنظیم شد ✅`);
-          return new Response("ok", { status: 200 });
-        }
-
-        // حالت ۵/۱۰
-        if (act === "m") {
-          const ok = await ensureMemberOrNotify();
-          if (!ok) return new Response("ok", { status: 200 });
-
-          const count = Number(parts[2] || 0);
-          const r = await stub.fetch("https://do/mode", {
-            method: "POST",
-            body: JSON.stringify({ by_user: from.id, count }),
-          });
-          const out = await r.json();
-          if (!out.ok) {
-            await tg.answerCallback(env, cq.id,
-              out.error === "only-starter" ? "فقط شروع‌کننده می‌تواند حالت را انتخاب کند." :
-              out.error === "invalid-mode" ? "حالت نامعتبر است." :
-              out.error === "already-started" ? "بازی شروع شده." : "خطا", true);
-            return new Response("ok", { status: 200 });
-          }
-          const modeLabel = out.modeCount === 5 ? "۵ سوالی" : out.modeCount === 10 ? "۱۰ سوالی" : `${out.modeCount} سوالی`;
-          await tg.answerCallback(env, cq.id, `حالت ${modeLabel} تنظیم شد ✅`);
-          return new Response("ok", { status: 200 });
-        }
-
-        // Join
-        if (act === "j") {
-          const ok = await ensureMemberOrNotify();
-          if (!ok) return new Response("ok", { status: 200 });
-
-          const r = await stub.fetch("https://do/join", {
-            method: "POST",
-            body: JSON.stringify({ user_id: from.id, name: from.first_name }),
-          });
-          const out = await r.json();
-          if (!out.ok) {
-            const msg =
-              out.error === "already-started" ? "بازی شروع شده است." :
-              out.error === "no-room" ? "اتاق پیدا نشد." :
-              "خطا در ثبت آمادگی.";
-            await tg.answerCallback(env, cq.id, msg, true);
-            return new Response("ok", { status: 200 });
-          }
-          const statusText = out.alreadyReady ? "قبلاً آماده بودی ✨" : "آماده شدی ✅";
-          await tg.answerCallback(env, cq.id, `${statusText} • آماده‌ها: ${out.readyCount}`);
-          return new Response("ok", { status: 200 });
-        }
-
-        // Start
-        if (act === "s") {
-          const ok = await ensureMemberOrNotify();
-          if (!ok) return new Response("ok", { status: 200 });
-
-          const r = await stub.fetch("https://do/start", {
-            method: "POST",
-            body: JSON.stringify({ by_user: from.id }),
-          });
-          const out = await r.json();
-          if (!out.ok) {
-            await tg.answerCallback(env, cq.id,
-              out.error === "only-starter" ? "فقط شروع‌کننده می‌تواند آغاز کند." :
-              out.error === "already-started" ? "بازی قبلاً شروع شده." :
-              out.error === "mode-not-set" ? "اول حالت (۵ یا ۱۰ سؤال) را انتخاب کنید." :
-              out.error === "course-not-set" ? "اول درس را انتخاب کنید." :
-              out.error === "template-not-set" ? "قالب را انتخاب کنید." :
-              out.error === "no-participants" ? "هیچ شرکت‌کننده‌ای آماده نیست." :
-              out.error === "no-questions" ? "بانک سؤال کافی نیست." : "خطا", true);
-            return new Response("ok", { status: 200 });
-          }
-          await tg.answerCallback(env, cq.id, "🚀 بازی آغاز شد!");
-          return new Response("ok", { status: 200 });
-        }
-
-        // Answer
-        if (act === "a") {
-          const ok = await ensureMemberOrNotify();
-          if (!ok) return new Response("ok", { status: 200 });
-
-          const qIndex = Number(parts[2]);
-          const opt = Number(parts[3]);
-          const r = await stub.fetch("https://do/answer", {
-            method: "POST",
-            body: JSON.stringify({ user_id: from.id, qIndex, option: opt }),
-          });
-          const out = await r.json();
-          if (out.ok && out.duplicate) await tg.answerCallback(env, cq.id, "قبلاً ثبت شده بود.");
-          else if (out.ok) await tg.answerCallback(env, cq.id, "پاسخ ثبت شد ✅");
-          else await tg.answerCallback(env, cq.id, "زمان یا حالت نامعتبر", true);
-          return new Response("ok", { status: 200 });
-        }
-
-        if (act === "gr") {
-          const r = await stub.fetch("https://do/group-review", {
-            method: "POST",
-            body: JSON.stringify({}),
-          });
-          const out = await r.json();
-          if (!out.ok) {
-            const errorMessages = {
-              "not-ended": "بازی هنوز تمام نشده است.",
-              "no-room": "اتاق پیدا نشد.",
-              "no-questions": "سؤالی برای نمایش وجود ندارد.",
-            };
-            const msgText = errorMessages[out.error] || "خطا در دریافت مرور گروهی.";
-            await tg.answerCallback(env, cq.id, msgText, true);
-            if (chat_id) await tg.sendMessage(env, chat_id, `⚠️ ${msgText}`);
-            return new Response("ok", { status: 200 });
-          }
-          await tg.answerCallback(env, cq.id, "ارسال شد ✅");
-          if (chat_id) await tg.sendMessage(env, chat_id, out.text);
-          await removeInlineKeyboard();
           return new Response("ok", { status: 200 });
         }
       }

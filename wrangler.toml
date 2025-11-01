@@ -4,12 +4,17 @@ compatibility_date = "2025-10-23"
 
 [durable_objects]
 bindings = [
-  { name = "ROOMS", class_name = "RoomDO" }
+  { name = "ROOMS", class_name = "RoomDO" },
+  { name = "CALLBACKS", class_name = "CallbackMapDO" }
 ]
 
 [[migrations]]
 tag = "v1-sqlite"
 new_sqlite_classes = ["RoomDO"]
+
+[[migrations]]
+tag = "v2-callback-map"
+new_sqlite_classes = ["CallbackMapDO"]
 
 # 🟢 متغیرهای غیرحساس که باید بعد از هر دپلوی باقی بمانند
 [vars]
