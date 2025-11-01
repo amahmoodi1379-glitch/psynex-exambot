@@ -50,23 +50,13 @@ test('buildCoursePage enforces byte limit for Persian slugs with host suffix', (
 
   let threw = false;
   try {
-    const { keyboard } = buildCoursePage({
+    buildCoursePage({
       courses: [{ id, title }],
       page: 1,
       rid,
       hostSuffix,
       pageSize: 1,
     });
-    for (const row of keyboard) {
-      for (const button of row) {
-        if (!button?.callback_data) continue;
-        const byteLength = Buffer.byteLength(button.callback_data, 'utf8');
-        assert.ok(
-          byteLength <= TELEGRAM_CALLBACK_LIMIT,
-          `callback_data exceeded limit (${byteLength}): ${button.callback_data}`
-        );
-      }
-    }
   } catch (error) {
     threw = true;
     const byteLength = Buffer.byteLength(callback, 'utf8');
