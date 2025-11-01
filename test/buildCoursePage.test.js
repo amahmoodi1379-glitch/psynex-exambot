@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 
 import { buildCoursePage, makeSlugFromTitle, COURSE_ID_MAX_LENGTH } from '../src/index.js';
-import { byteLen } from '../src/utils.js';
+import { byteLen, ensureIdMap } from '../src/utils.js';
 
 if (!globalThis.crypto?.subtle) {
   globalThis.crypto = webcrypto;
@@ -30,7 +30,10 @@ class MemoryR2Bucket {
   async head(key) {
     return this.store.has(key) ? { key } : null;
   }
-  async put(key, value) {
+  async put(key, value, options = {}) {
+    if (options?.onlyIf?.etagDoesNotMatch === '*' && this.store.has(key)) {
+      return null;
+    }
     const body = typeof value === 'string' ? value : JSON.stringify(value);
     this.store.set(key, body);
     return { key };
@@ -103,4 +106,16 @@ test('buildCoursePage creates deterministic idmap entries for long slugs', async
   const parsed = await mapObject.json();
   assert.equal(parsed.key, id, 'idmap should point to original course id');
   assert.ok(byteLen(button.callback_data) <= TELEGRAM_CALLBACK_LIMIT, 'callback_data should respect Telegram limit');
+});
+
+test('ensureIdMap throws when a different key already exists for the same sid', async () => {
+  const env = { QUESTIONS: new MemoryR2Bucket() };
+  const sid = 'abcdef';
+  const first = await ensureIdMap(env, sid, 'original-long-key');
+  assert.equal(first, `idmap/${sid}.json`);
+
+  await assert.rejects(
+    () => ensureIdMap(env, sid, 'conflicting-long-key'),
+    /idmap collision for abcdef/
+  );
 });

@@ -47,31 +47,38 @@ export async function ensureIdMap(env, sid, longKey) {
   const safeSid = String(sid || "").trim();
   const keyValue = String(longKey || "").trim();
   if (!safeSid || !keyValue) throw new Error("Missing sid or longKey for id map");
+
   const bucket = getBucket(env);
   const mapKey = `idmap/${safeSid}.json`;
-  const head = await bucket.head(mapKey);
-  if (!head) {
-    await bucket.put(mapKey, JSON.stringify({ key: keyValue }), {
-      httpMetadata: { contentType: "application/json; charset=utf-8" },
-    });
+  const mapValue = JSON.stringify({ key: keyValue });
+  const httpMetadata = { contentType: "application/json; charset=utf-8" };
+
+  const obj = await bucket.put(mapKey, mapValue, {
+    onlyIf: { etagDoesNotMatch: "*" },
+    httpMetadata,
+  });
+
+  if (obj !== null) {
     return mapKey;
   }
-  const obj = await bucket.get(mapKey);
-  if (!obj) {
-    await bucket.put(mapKey, JSON.stringify({ key: keyValue }), {
-      httpMetadata: { contentType: "application/json; charset=utf-8" },
-    });
-    return mapKey;
+
+  const existing = await bucket.get(mapKey);
+  if (!existing) {
+    throw new Error(`idmap race condition for ${safeSid}. Please retry.`);
   }
+
+  let data;
   try {
-    const data = await obj.json();
-    if (data?.key && data.key !== keyValue) {
-      throw new Error(`idmap collision for ${safeSid}`);
-    }
+    data = await existing.json();
   } catch (err) {
     console.error("Failed to validate idmap", mapKey, err);
     throw err;
   }
+
+  if (data?.key && data.key !== keyValue) {
+    throw new Error(`idmap collision for ${safeSid}`);
+  }
+
   return mapKey;
 }
 
