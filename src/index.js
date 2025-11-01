@@ -1160,10 +1160,28 @@ export default {
             hostSuffix,
           });
           const messageText = buildCourseListMessage(currentPage, totalPages);
-          await tg.answerCallback(env, cq.id, "لیست درس‌ها");
-          await tg.sendMessage(env, chat_id, messageText, {
-            reply_markup: { inline_keyboard: keyboard },
-          });
+          const targetChatId = hostChatId ?? chat_id;
+          if (!targetChatId) {
+            await tg.answerCallback(env, cq.id, "ارسال لیست ممکن نیست. چت نامشخص است.", true);
+            return new Response("ok", { status: 200 });
+          }
+          try {
+            const sendResult = await tg.sendMessage(env, targetChatId, messageText, {
+              reply_markup: { inline_keyboard: keyboard },
+            });
+            if (!sendResult?.ok) {
+              throw new Error("Telegram sendMessage failed");
+            }
+            await tg.answerCallback(env, cq.id, "لیست درس‌ها");
+          } catch (err) {
+            console.error("course list send error", err);
+            await tg.answerCallback(
+              env,
+              cq.id,
+              "ارسال لیست ممکن نشد. دوباره تلاش کنید.",
+              true
+            );
+          }
           return new Response("ok", { status: 200 });
         }
 
@@ -1175,9 +1193,10 @@ export default {
           const courses = await getCourses(env);
           if (!courses.length) {
             await tg.answerCallback(env, cq.id, "هیچ درسی تعریف نشده.", true);
-            if (chat_id && msg.message_id) {
+            const targetChatId = hostChatId ?? chat_id;
+            if (targetChatId && msg.message_id) {
               await tg.call(env, "editMessageText", {
-                chat_id,
+                chat_id: targetChatId,
                 message_id: msg.message_id,
                 text: "هیچ درسی تعریف نشده.",
                 parse_mode: "HTML",
@@ -1193,7 +1212,8 @@ export default {
             rid,
             hostSuffix,
           });
-          if (!chat_id || !msg.message_id) {
+          const targetChatId = hostChatId ?? chat_id;
+          if (!targetChatId || !msg.message_id) {
             await tg.answerCallback(env, cq.id, "پیام یافت نشد.", true);
             return new Response("ok", { status: 200 });
           }
@@ -1202,7 +1222,7 @@ export default {
 
           try {
             const editResult = await tg.call(env, "editMessageText", {
-              chat_id,
+              chat_id: targetChatId,
               message_id: msg.message_id,
               text: messageText,
               parse_mode: "HTML",
