@@ -1191,9 +1191,9 @@ export default {
 
           const requestedPage = parts[2];
           const courses = await getCourses(env);
+          const targetChatId = hostChatId ?? chat_id;
           if (!courses.length) {
             await tg.answerCallback(env, cq.id, "هیچ درسی تعریف نشده.", true);
-            const targetChatId = hostChatId ?? chat_id;
             if (targetChatId && msg.message_id) {
               await tg.call(env, "editMessageText", {
                 chat_id: targetChatId,
@@ -1212,7 +1212,6 @@ export default {
             rid,
             hostSuffix,
           });
-          const targetChatId = hostChatId ?? chat_id;
           if (!targetChatId || !msg.message_id) {
             await tg.answerCallback(env, cq.id, "پیام یافت نشد.", true);
             return new Response("ok", { status: 200 });
