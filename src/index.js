@@ -130,6 +130,12 @@ const ROOM_ID_MAX_LENGTH = 8; // shortId() => 6 chars timestamp + up to 2 chars 
 const HOST_SUFFIX_MAX_LENGTH = 19; // :host + encChatId (p + base36 up to 13 chars)
 const COURSE_ID_SUFFIX_LENGTH = 4;
 const COURSE_SLUG_SEPARATOR = "-";
+const COMPACT_COURSE_KEY_PREFIX = "i";
+
+const _textEncoder = new TextEncoder();
+function utf8Length(value) {
+  return _textEncoder.encode(String(value ?? "")).length;
+}
 export const COURSE_ID_MAX_LENGTH = Math.max(
   16,
   TELEGRAM_CALLBACK_DATA_LIMIT -
@@ -172,9 +178,10 @@ function toPersianDigits(value) {
 
 function assertCallbackWithinLimit(value, context) {
   if (typeof value !== "string") return;
-  if (value.length > TELEGRAM_CALLBACK_DATA_LIMIT) {
+  const bytes = utf8Length(value);
+  if (bytes > TELEGRAM_CALLBACK_DATA_LIMIT) {
     throw new Error(
-      `${context} callback_data exceeds ${TELEGRAM_CALLBACK_DATA_LIMIT} bytes (${value.length})`
+      `${context} callback_data exceeds ${TELEGRAM_CALLBACK_DATA_LIMIT} bytes (got ${bytes})`
     );
   }
 }
@@ -193,7 +200,7 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
   let row = [];
   const ridPart = String(rid ?? "");
   const suffixPart = String(hostSuffix ?? "");
-  for (const course of pageItems) {
+  for (const [offset, course] of pageItems.entries()) {
     const courseId = String(course?.id ?? "").trim();
     if (!courseId) continue;
     if (courseId.length > COURSE_ID_MAX_LENGTH) {
@@ -201,7 +208,12 @@ function buildCoursePage({ courses, page = 1, rid, hostSuffix = "", pageSize = C
         `course id '${courseId}' exceeds ${COURSE_ID_MAX_LENGTH} characters`
       );
     }
-    const callback = `${COURSE_CALLBACK_PREFIX}${ridPart}${COURSE_CALLBACK_SEPARATOR}${courseId}${suffixPart}`;
+    let callback = `${COURSE_CALLBACK_PREFIX}${ridPart}${COURSE_CALLBACK_SEPARATOR}${courseId}${suffixPart}`;
+    if (utf8Length(callback) > TELEGRAM_CALLBACK_DATA_LIMIT) {
+      const globalIndex = startIndex + offset;
+      const compactKey = `${COMPACT_COURSE_KEY_PREFIX}${globalIndex.toString(36)}`;
+      callback = `${COURSE_CALLBACK_PREFIX}${ridPart}${COURSE_CALLBACK_SEPARATOR}${compactKey}${suffixPart}`;
+    }
     assertCallbackWithinLimit(callback, `course ${courseId}`);
     row.push({ text: course.title, callback_data: callback });
     if (row.length === COURSES_KEYBOARD_COLUMNS) {
@@ -1254,7 +1266,31 @@ export default {
           const ok = await ensureMemberOrNotify();
           if (!ok) return new Response("ok", { status: 200 });
 
-          const courseId = parts[2];
+          const token = parts[2];
+          if (!token) {
+            await tg.answerCallback(env, cq.id, "درس یافت نشد.", true);
+            return new Response("ok", { status: 200 });
+          }
+
+          const courses = await getCourses(env);
+          const directMatch = courses.find((course) => String(course?.id) === token);
+          let courseId = directMatch ? String(directMatch.id) : token;
+
+          if (!directMatch && token.startsWith(COMPACT_COURSE_KEY_PREFIX)) {
+            const indexPart = token.slice(COMPACT_COURSE_KEY_PREFIX.length);
+            const index = Number.parseInt(indexPart, 36);
+            if (Number.isNaN(index) || index < 0 || index >= courses.length) {
+              await tg.answerCallback(env, cq.id, "درس یافت نشد.", true);
+              return new Response("ok", { status: 200 });
+            }
+            const course = courses[index];
+            if (!course?.id) {
+              await tg.answerCallback(env, cq.id, "درس یافت نشد.", true);
+              return new Response("ok", { status: 200 });
+            }
+            courseId = String(course.id);
+          }
+
           const r = await stub.fetch("https://do/course", {
             method: "POST",
             body: JSON.stringify({ by_user: from.id, courseId }),
