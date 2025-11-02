@@ -1273,23 +1273,28 @@ export default {
           }
 
           const courses = await getCourses(env);
-          const directMatch = courses.find((course) => String(course?.id) === token);
-          let courseId = directMatch ? String(directMatch.id) : token;
+          const respondCourseNotFound = async () => {
+            await tg.answerCallback(env, cq.id, "درس یافت نشد.", true);
+            return new Response("ok", { status: 200 });
+          };
 
-          if (!directMatch && token.startsWith(COMPACT_COURSE_KEY_PREFIX)) {
+          let course = null;
+          if (token.startsWith(COMPACT_COURSE_KEY_PREFIX)) {
             const indexPart = token.slice(COMPACT_COURSE_KEY_PREFIX.length);
             const index = Number.parseInt(indexPart, 36);
-            if (Number.isNaN(index) || index < 0 || index >= courses.length) {
-              await tg.answerCallback(env, cq.id, "درس یافت نشد.", true);
-              return new Response("ok", { status: 200 });
+            if (!Number.isNaN(index) && index >= 0 && index < courses.length) {
+              course = courses[index];
             }
-            const course = courses[index];
-            if (!course?.id) {
-              await tg.answerCallback(env, cq.id, "درس یافت نشد.", true);
-              return new Response("ok", { status: 200 });
-            }
-            courseId = String(course.id);
           }
+          if (!course) {
+            course = courses.find((c) => String(c?.id) === token) ?? null;
+          }
+
+          if (!course?.id) {
+            return await respondCourseNotFound();
+          }
+
+          const courseId = String(course.id);
 
           const r = await stub.fetch("https://do/course", {
             method: "POST",
