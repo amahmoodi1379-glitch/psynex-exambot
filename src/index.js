@@ -1492,13 +1492,12 @@ export default {
       }
 
       const items = await listQuestionObjects(env, { course });
-      const allQuestions = [];
-      for (const item of items) {
-        const qData = await readQuestionObject(env, item.key);
-        if (qData) {
-          allQuestions.push(qData);
-        }
-      }
+      // خواندن همه سؤالات به‌صورت همزمان برای جلوگیری از طولانی شدن زمان (Timeout)
+      const fetchPromises = items.map(item => readQuestionObject(env, item.key));
+      const results = await Promise.all(fetchPromises);
+      
+      // حذف مواردی که ممکن است خالی (null) باشند
+      const allQuestions = results.filter(qData => qData !== null);
 
       const filename = `export-${course}-${Date.now()}.json`;
       return new Response(JSON.stringify(allQuestions, null, 2), { 
