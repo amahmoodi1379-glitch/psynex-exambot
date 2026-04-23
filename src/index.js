@@ -553,11 +553,12 @@ code{background:#f3f4f6;border-radius:6px;padding:0 6px;font-family:ui-monospace
         </div>
       </div>
       <div>
-        <label>حذف درس</label>
+        <label>عملیات درس</label>
         <div class="flex">
+          <button id="exportCourseBtn" class="btn btn-green btn-outline">📥 دانلود فایل JSON درس</button>
           <button id="deleteCourseBtn" class="btn btn-red btn-outline">حذف این درس</button>
         </div>
-        <div class="small muted">حذف فقط متادیتا را پاک می‌کند؛ فایل‌های سؤال‌ها دست‌نخورده می‌مانند.</div>
+        <div class="small muted">دانلود شامل تمام سؤالات این درس است. حذف فقط نام درس را پاک می‌کند.</div>
       </div>
     </div>
   </div>
@@ -774,6 +775,17 @@ code{background:#f3f4f6;border-radius:6px;padding:0 6px;font-family:ui-monospace
       alert("خطا: " + (j.error||""));
     }
   });
+const exportCourseBtn = document.getElementById("exportCourseBtn");
+  if(exportCourseBtn){
+    exportCourseBtn.addEventListener("click", () => {
+      const id = courseSelect.value;
+      if (!id) { alert("ابتدا یک درس را انتخاب کنید."); return; }
+      
+      const exportUrl = api("/admin/export") + "&course=" + encodeURIComponent(id);
+      window.open(exportUrl, "_blank");
+    });
+  }
+  
   deleteCourseBtn.addEventListener("click", async ()=>{
     const id = courseSelect.value;
     if(!id){ alert("درسی انتخاب نشده."); return; }
@@ -1468,6 +1480,36 @@ export default {
       return admin2Html({ key });
     }
 
+    // Endpoint برای دانلود کل سوالات یک درس
+    if (url.pathname === "/admin/export" && request.method === "GET") {
+      const key = url.searchParams.get("key") || "";
+      if (!env.ADMIN_KEY || key !== env.ADMIN_KEY)
+        return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), { status: 401, headers: { "content-type": "application/json; charset=utf-8" } });
+      
+      const course = url.searchParams.get("course");
+      if (!course) {
+        return new Response(JSON.stringify({ ok: false, error: "course parameter is missing" }), { status: 400, headers: { "content-type": "application/json; charset=utf-8" } });
+      }
+
+      const items = await listQuestionObjects(env, { course });
+      const allQuestions = [];
+      for (const item of items) {
+        const qData = await readQuestionObject(env, item.key);
+        if (qData) {
+          allQuestions.push(qData);
+        }
+      }
+
+      const filename = `export-${course}-${Date.now()}.json`;
+      return new Response(JSON.stringify(allQuestions, null, 2), { 
+        status: 200, 
+        headers: { 
+          "content-type": "application/json; charset=utf-8",
+          "content-disposition": `attachment; filename="${filename}"`
+        } 
+      });
+    }
+    
     // لیست سؤال‌ها
     if (url.pathname === "/admin/list" && request.method === "GET") {
       const key = url.searchParams.get("key") || "";
